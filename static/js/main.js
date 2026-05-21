@@ -1,61 +1,84 @@
-class FloodSceneApp {
+class MotionApp {
     constructor() {
         this.sessionId = null;
-        this.motionSocket = null;
-        this.audioSocket = null;
-        this.videoSocket = null;
-        this.audioTimer = null;
-        this.videoTimer = null;
+        this.realtimeSocket = null;
+
+        this.isRunning = false;
+        this.isPaused = false;
+        this.inputMode = 'online';
+        this.targetFps = 20;
         this.frameCount = 0;
-        this.fpsCounter = 0;
-        this.fpsUpdatedAt = performance.now();
-        this.lastRoot = new THREE.Vector3(0, 1, 0);
+        this.motionFpsCounter = 0;
+        this.motionFpsUpdatedAt = performance.now();
+        this.bufferCapacity = 4;
+        this.historyLength = 4;
+        this.smoothingAlpha = 1.0;
+        this.lastUserInteraction = 0;
+        this.autoFollowDelay = 2000;
+        this.currentRootPos = new THREE.Vector3(0, 1, 0);
+        this.displayFramePrevious = null;
+        this.displayFrameCurrent = null;
+        this.displayFrameStartedAt = 0;
+        this.sourceFrameIntervalMs = 1000 / 30;
+        this.avatar = null;
+        this.meshReadyPromise = Promise.resolve();
+        this.config = null;
+        this.offlineCueRows = [
+            { text: 'walk forward', start: 0, end: '' },
+            { text: 'turn left', start: 5, end: '' },
+            { text: 'wave hand', start: 9, end: 14 },
+        ];
 
         this.bindElements();
-        this.initScene();
-        this.bindEvents();
-        this.loadConfig();
+        this.initThreeJS();
+        this.initUI();
+        this.meshReadyPromise = this.loadConfig();
         this.animate();
-        if (window.lucide) window.lucide.createIcons();
     }
 
     bindElements() {
-        this.promptInput = document.getElementById('promptInput');
-        this.audioToggle = document.getElementById('audioToggle');
-        this.videoToggle = document.getElementById('videoToggle');
-        this.startBtn = document.getElementById('startBtn');
-        this.stopBtn = document.getElementById('stopBtn');
-        this.updateBtn = document.getElementById('updateBtn');
+        this.statusEl = document.getElementById('status');
+        this.bufferSizeEl = document.getElementById('bufferSize');
+        this.fpsEl = document.getElementById('fps');
         this.frameCountEl = document.getElementById('frameCount');
-        this.fpsValue = document.getElementById('fpsValue');
-        this.budgetValue = document.getElementById('budgetValue');
-        this.sessionValue = document.getElementById('sessionValue');
-        this.asrState = document.getElementById('asrState');
-        this.vlmState = document.getElementById('vlmState');
-        this.ttsState = document.getElementById('ttsState');
-        this.motionState = document.getElementById('motionState');
-        this.transcriptBox = document.getElementById('transcriptBox');
-        this.sceneBox = document.getElementById('sceneBox');
-        this.eventLog = document.getElementById('eventLog');
-        this.connectionState = document.getElementById('connectionState');
-        this.stageTitle = document.getElementById('stageTitle');
+        this.currentSmoothingEl = document.getElementById('currentSmoothing');
+        this.currentHistoryEl = document.getElementById('currentHistory');
+        this.motionText = document.getElementById('motionText');
+        this.onlineModeBtn = document.getElementById('onlineModeBtn');
+        this.offlineModeBtn = document.getElementById('offlineModeBtn');
+        this.onlineInputPanel = document.getElementById('onlineInputPanel');
+        this.offlineInputPanel = document.getElementById('offlineInputPanel');
+        this.offlineScheduleRows = document.getElementById('offlineScheduleRows');
+        this.addCueBtn = document.getElementById('addCueBtn');
+        this.startResetBtn = document.getElementById('startResetBtn');
+        this.updateBtn = document.getElementById('updateBtn');
+        this.pauseResumeBtn = document.getElementById('pauseResumeBtn');
+        this.configBtn = document.getElementById('configBtn');
+        this.configModal = document.getElementById('configModal');
+        this.scheduleConfigFields = document.getElementById('scheduleConfigFields');
+        this.cfgConfigFields = document.getElementById('cfgConfigFields');
+        this.modalHistoryLength = document.getElementById('modalHistoryLength');
+        this.modalSmoothingAlpha = document.getElementById('modalSmoothingAlpha');
+        this.modalSmoothingValue = document.getElementById('modalSmoothingValue');
+        this.configDiscardBtn = document.getElementById('configDiscardBtn');
+        this.configSaveBtn = document.getElementById('configSaveBtn');
     }
 
-    initScene() {
+    initThreeJS() {
         const canvas = document.getElementById('renderCanvas');
         const container = document.getElementById('canvas-container');
+
         this.scene = new THREE.Scene();
-        this.scene.background = new THREE.Color(0xe5e8ec);
-        this.scene.fog = new THREE.Fog(0xe5e8ec, 14, 42);
+        this.scene.background = new THREE.Color(0xffffff);
 
         this.camera = new THREE.PerspectiveCamera(
             48,
             container.clientWidth / container.clientHeight,
             0.1,
-            120,
+            1000,
         );
         this.camera.position.set(4.8, 2.3, 5.0);
-        this.camera.lookAt(0, 0.8, 0);
+        this.camera.lookAt(0, 0.9, 0);
 
         this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
         this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
@@ -63,37 +86,38 @@ class FloodSceneApp {
         this.renderer.shadowMap.enabled = true;
         this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
         this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-        this.renderer.toneMappingExposure = 1.08;
+        this.renderer.toneMappingExposure = 1.0;
 
-        this.scene.add(new THREE.HemisphereLight(0xdbeafe, 0x3a332f, 0.75));
-        this.scene.add(new THREE.AmbientLight(0xffffff, 0.22));
+        this.scene.add(new THREE.AmbientLight(0xffffff, 0.7));
 
-        this.keyLight = new THREE.DirectionalLight(0xfff2dc, 1.25);
-        this.keyLight.position.set(4, 8, 5);
+        this.keyLight = new THREE.DirectionalLight(0xffffff, 0.82);
+        this.keyLight.position.set(5, 8, 3);
         this.keyLight.castShadow = true;
         this.keyLight.shadow.mapSize.set(2048, 2048);
-        this.keyLight.shadow.camera.left = -8;
-        this.keyLight.shadow.camera.right = 8;
-        this.keyLight.shadow.camera.top = 8;
-        this.keyLight.shadow.camera.bottom = -8;
+        this.keyLight.shadow.camera.near = 0.5;
+        this.keyLight.shadow.camera.far = 50;
+        this.keyLight.shadow.camera.left = -5;
+        this.keyLight.shadow.camera.right = 5;
+        this.keyLight.shadow.camera.top = 5;
+        this.keyLight.shadow.camera.bottom = -5;
         this.scene.add(this.keyLight);
         this.scene.add(this.keyLight.target);
 
         const floor = new THREE.Mesh(
-            new THREE.PlaneGeometry(18, 13),
-            new THREE.MeshStandardMaterial({ color: 0xbfc7c4, roughness: 0.82 }),
+            new THREE.PlaneGeometry(22, 22),
+            new THREE.ShadowMaterial({ color: 0x000000, opacity: 0.08 }),
         );
         floor.rotation.x = -Math.PI / 2;
         floor.receiveShadow = true;
         this.scene.add(floor);
 
-        const grid = new THREE.GridHelper(18, 18, 0x63706b, 0xd7ddda);
-        grid.position.y = 0.012;
+        const grid = new THREE.GridHelper(22, 22, 0xd0d0d0, 0xeeeeee);
+        grid.position.y = 0.01;
         this.scene.add(grid);
 
         const targetRing = new THREE.Mesh(
             new THREE.RingGeometry(1.6, 1.62, 96),
-            new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.85 }),
+            new THREE.MeshBasicMaterial({ color: 0xd6d6d6, transparent: true, opacity: 0.9 }),
         );
         targetRing.rotation.x = -Math.PI / 2;
         targetRing.position.y = 0.018;
@@ -102,22 +126,171 @@ class FloodSceneApp {
         this.controls = new THREE.OrbitControls(this.camera, canvas);
         this.controls.target.set(0, 0.9, 0);
         this.controls.enableDamping = true;
-        this.controls.dampingFactor = 0.07;
+        this.controls.dampingFactor = 0.08;
 
-        this.skeleton = new Skeleton3D(this.scene);
+        const markInteraction = () => {
+            this.lastUserInteraction = performance.now();
+        };
+        canvas.addEventListener('pointerdown', markInteraction);
+        canvas.addEventListener('wheel', markInteraction, { passive: true });
+
         window.addEventListener('resize', () => this.resize());
     }
 
-    bindEvents() {
-        this.startBtn.addEventListener('click', () => this.start());
-        this.stopBtn.addEventListener('click', () => this.stop());
-        this.updateBtn.addEventListener('click', () => this.updatePrompt());
+    initUI() {
+        this.startResetBtn.addEventListener('click', () => {
+            if (this.isRunning) {
+                this.reset();
+            } else {
+                this.start();
+            }
+        });
+        this.updateBtn.addEventListener('click', () => this.updateText());
+        this.pauseResumeBtn.addEventListener('click', () => this.togglePause());
+        this.configBtn.addEventListener('click', () => this.openConfig());
+        this.onlineModeBtn.addEventListener('click', () => this.setInputMode('online'));
+        this.offlineModeBtn.addEventListener('click', () => this.setInputMode('offline'));
+        this.addCueBtn.addEventListener('click', () => this.addOfflineCue());
+        this.motionText.addEventListener('keydown', event => {
+            if (event.key === 'Enter' && this.inputMode === 'online') {
+                event.preventDefault();
+                if (this.isRunning) this.updateText();
+            }
+        });
+        this.configDiscardBtn.addEventListener('click', () => this.closeConfig());
+        this.configSaveBtn.addEventListener('click', () => this.saveConfig());
+        this.modalSmoothingAlpha.addEventListener('input', () => {
+            this.modalSmoothingValue.textContent = Number(this.modalSmoothingAlpha.value).toFixed(2);
+        });
+        this.configModal.addEventListener('click', event => {
+            if (event.target === this.configModal) this.closeConfig();
+        });
+        window.addEventListener('beforeunload', () => this.sendResetBeacon());
+        this.renderStaticConfigFields();
+        this.renderOfflineSchedule();
+        this.setInputMode('online');
+        this.syncConfigLabels();
+    }
+
+    renderStaticConfigFields() {
+        this.scheduleConfigFields.innerHTML = `
+            <div class="config-field">
+                <label for="modalTargetFps">Target FPS</label>
+                <input id="modalTargetFps" type="number" value="20" disabled>
+            </div>
+            <div class="config-field">
+                <label for="modalBufferCapacity">Buffer Capacity</label>
+                <input id="modalBufferCapacity" type="number" value="4" disabled>
+            </div>
+        `;
+        this.cfgConfigFields.innerHTML = `
+            <div class="config-field">
+                <label for="modalGuidanceScale">Guidance Scale</label>
+                <input id="modalGuidanceScale" type="text" value="simulated endpoint" disabled>
+            </div>
+        `;
+    }
+
+    setInputMode(mode) {
+        if (this.isRunning) return;
+        this.inputMode = mode;
+        const isOnline = mode === 'online';
+        this.onlineModeBtn.classList.toggle('active', isOnline);
+        this.offlineModeBtn.classList.toggle('active', !isOnline);
+        this.onlineInputPanel.hidden = !isOnline;
+        this.offlineInputPanel.hidden = isOnline;
+        this.updateBtn.textContent = isOnline ? 'Send Text' : 'Schedule Locked';
+        this.updateBtn.disabled = !this.isRunning || !isOnline;
+    }
+
+    renderOfflineSchedule() {
+        this.offlineScheduleRows.innerHTML = '';
+        this.offlineCueRows.forEach((cue, index) => {
+            const row = document.createElement('div');
+            row.className = 'offline-cue-row';
+            row.dataset.index = String(index);
+            row.innerHTML = `
+                <input class="offline-text" type="text" value="${this.escapeAttr(cue.text)}" placeholder="Text ${index + 1}">
+                <input class="offline-start" type="number" min="0" step="0.1" value="${cue.start}" placeholder="Start">
+                <input class="offline-end" type="number" min="0" step="0.1" value="${cue.end ?? ''}" placeholder="${index === this.offlineCueRows.length - 1 ? 'End' : 'Auto'}">
+                <button class="btn btn-compact remove-cue" type="button"${this.offlineCueRows.length <= 1 ? ' disabled' : ''}>Remove</button>
+            `;
+            row.querySelector('.remove-cue').addEventListener('click', () => this.removeOfflineCue(index));
+            this.offlineScheduleRows.appendChild(row);
+        });
+    }
+
+    escapeAttr(value) {
+        return String(value).replaceAll('&', '&amp;').replaceAll('"', '&quot;').replaceAll('<', '&lt;');
+    }
+
+    addOfflineCue() {
+        const last = this.offlineCueRows[this.offlineCueRows.length - 1] || { start: 0 };
+        this.offlineCueRows.push({
+            text: 'new motion',
+            start: Number(last.start || 0) + 4,
+            end: Number(last.start || 0) + 8,
+        });
+        this.renderOfflineSchedule();
+    }
+
+    removeOfflineCue(index) {
+        if (this.offlineCueRows.length <= 1) return;
+        this.offlineCueRows.splice(index, 1);
+        this.renderOfflineSchedule();
+    }
+
+    readOfflineSchedule() {
+        const rows = [...this.offlineScheduleRows.querySelectorAll('.offline-cue-row')];
+        const schedule = rows.map((row, index) => {
+            const text = row.querySelector('.offline-text').value.trim();
+            const start = Number(row.querySelector('.offline-start').value);
+            const endInput = row.querySelector('.offline-end').value;
+            const cue = { text, start };
+            if (index === rows.length - 1) cue.end = Number(endInput);
+            return cue;
+        });
+
+        if (!schedule.length) throw new Error('Offline schedule is empty.');
+        if (schedule[0].start !== 0) throw new Error('The first offline cue must start at 0.');
+        for (let i = 0; i < schedule.length; i++) {
+            const cue = schedule[i];
+            if (!cue.text) throw new Error('Offline cue text cannot be empty.');
+            if (!Number.isFinite(cue.start) || cue.start < 0) throw new Error('Invalid offline cue start time.');
+            if (i > 0 && cue.start <= schedule[i - 1].start) {
+                throw new Error('Offline cue start times must increase.');
+            }
+        }
+        const finalCue = schedule[schedule.length - 1];
+        if (!Number.isFinite(finalCue.end) || finalCue.end <= finalCue.start) {
+            throw new Error('The final offline cue must have an end time after its start.');
+        }
+        this.offlineCueRows = schedule.map(cue => ({ text: cue.text, start: cue.start, end: cue.end ?? '' }));
+        return schedule;
     }
 
     async loadConfig() {
-        const response = await fetch('/api/config');
-        const config = await response.json();
-        this.budgetValue.textContent = `${Math.round(config.budget_remaining_seconds)}s`;
+        try {
+            const response = await fetch('/api/config');
+            const config = await response.json();
+            this.config = config;
+            this.targetFps = config.frame_rate || 20;
+            await this.initAvatar(config);
+            this.syncConfigLabels();
+            return config;
+        } catch (error) {
+            this.setStatus('Offline');
+            throw error;
+        }
+    }
+
+    async initAvatar(config) {
+        if (this.avatar) return;
+        this.avatar = AvatarFactory.fromConfig(config, this.scene);
+        await this.avatar.loadTopology().catch(error => {
+            this.setStatus(`${this.avatar.displayName} Missing`);
+            throw error;
+        });
     }
 
     wsUrl(path) {
@@ -126,199 +299,347 @@ class FloodSceneApp {
     }
 
     async start() {
-        this.setButtons(true);
-        this.log('Session', 'creating HF Endpoint simulation session');
-        const response = await fetch('/api/session/start', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                text: this.promptInput.value,
-                audio_enabled: this.audioToggle.checked,
-                video_enabled: this.videoToggle.checked,
-                endpoint_mode: 'hf-endpoint-sim',
-            }),
-        });
+        this.setStatus('Loading');
+        this.setControlsLocked(true);
 
-        if (!response.ok) {
-            const error = await response.json();
-            this.log('Budget', error.detail || 'session start failed');
-            this.setButtons(false);
+        try {
+            await this.meshReadyPromise;
+            if (!this.avatar) throw new Error('Avatar failed to initialize');
+            this.frameCount = 0;
+            this.motionFpsCounter = 0;
+            this.motionFpsUpdatedAt = performance.now();
+            this.displayFramePrevious = null;
+            this.displayFrameCurrent = null;
+            this.avatar.clearTrail();
+            this.avatar.setVisible(false);
+            this.updateFrameDisplay(0);
+            this.updateBufferDisplay(0, this.bufferCapacity);
+            this.fpsEl.textContent = '0';
+
+            const sessionPayload = {
+                renderer: this.config?.renderer || 'g1',
+                input_mode: this.inputMode,
+                frame_rate: this.targetFps,
+            };
+            if (this.inputMode === 'online') {
+                sessionPayload.initial_text = this.motionText.value;
+            } else {
+                sessionPayload.schedule = this.readOfflineSchedule();
+            }
+
+            const response = await fetch('/api/realtime/sessions', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(sessionPayload),
+            });
+
+            if (!response.ok) {
+                const error = await response.json();
+                this.setStatus(error.detail || 'Error');
+                this.setControlsLocked(false);
+                return;
+            }
+
+            const data = await response.json();
+            this.sessionId = data.session_id;
+            this.isRunning = true;
+            this.isPaused = false;
+            this.connectRealtime();
+            this.setButtonState();
+        } catch (error) {
+            this.setStatus(error.message || 'Error');
+            this.setControlsLocked(false);
+        }
+    }
+
+    connectRealtime() {
+        const socket = new WebSocket(this.wsUrl(`/api/realtime/sessions/${this.sessionId}`));
+        socket.binaryType = 'arraybuffer';
+        this.realtimeSocket = socket;
+        socket.onopen = () => {
+            if (this.realtimeSocket !== socket) return;
+            this.setStatus('Streaming');
+        };
+        socket.onmessage = event => {
+            if (this.realtimeSocket !== socket) return;
+            if (event.data instanceof ArrayBuffer) {
+                this.applyBinaryMotionFrame(new Float32Array(event.data));
+                return;
+            }
+            const data = JSON.parse(event.data);
+            this.applyRealtimeEvent(data);
+        };
+        socket.onclose = () => {
+            if (this.realtimeSocket !== socket) return;
+            this.realtimeSocket = null;
+            if (this.isRunning) this.setStatus('Idle');
+        };
+    }
+
+    applyRealtimeEvent(data) {
+        if (data.type === 'session.paused') {
+            this.isPaused = true;
+            this.setButtonState();
+            this.setStatus('Paused');
+        } else if (data.type === 'session.resumed' || data.type === 'session.started') {
+            this.isPaused = false;
+            this.setButtonState();
+            this.setStatus('Streaming');
+        } else if (data.type === 'input_text.committed') {
+            this.setStatus(this.isPaused ? 'Paused' : 'Streaming');
+        } else if (data.type === 'motion_generation.started') {
+            this.setStatus('Generating');
+        } else if (data.type === 'motion_generation.segment_completed') {
+            this.setStatus('Streaming');
+        } else if (data.type === 'motion_generation.completed') {
+            this.setStatus('Streaming');
+        } else if (data.type === 'offline_cue.changed') {
+            this.setStatus('Streaming');
+        } else if (data.type === 'offline_schedule.completed') {
+            this.isRunning = false;
+            this.isPaused = false;
+            this.sessionId = null;
+            this.closeSockets();
+            this.setButtonState();
+            this.setStatus('Complete');
+        } else if (data.type === 'budget_exhausted') {
+            this.setStatus('Budget');
+            this.reset(false);
+        } else if (data.type === 'error') {
+            this.setStatus(data.code || 'Error');
+        }
+    }
+
+    applyBinaryMotionFrame(packet) {
+        const headerSize = 9;
+        if (packet.length <= headerSize) return;
+        if (!this.avatar) return;
+        const frame = this.avatar.readFrame(packet, headerSize);
+        if (!frame) return;
+
+        this.enqueueDisplayFrame(frame);
+        this.frameCount = frame.frameId;
+        this.motionFpsCounter += 1;
+        this.updateFrameDisplay(frame.frameId);
+        this.updateBufferDisplay(frame.bufferSize, frame.bufferCapacity);
+        this.updateMotionFps();
+        if (!this.isPaused) this.setStatus('Streaming');
+    }
+
+    copyFrame(frame) {
+        return {
+            frameId: frame.frameId,
+            root: [...frame.root],
+            bufferSize: frame.bufferSize,
+            bufferCapacity: frame.bufferCapacity,
+            joints: new Float32Array(frame.joints),
+            rotations: new Float32Array(frame.rotations),
+        };
+    }
+
+    enqueueDisplayFrame(frame) {
+        const copied = this.copyFrame(frame);
+        if (!this.displayFrameCurrent) {
+            this.displayFramePrevious = copied;
+            this.displayFrameCurrent = copied;
+            this.displayFrameStartedAt = performance.now();
+            this.avatar.applyFrame(copied, 1);
+            this.currentRootPos.set(copied.root[0], copied.root[1], copied.root[2]);
+            return;
+        }
+        this.displayFramePrevious = this.displayFrameCurrent;
+        this.displayFrameCurrent = copied;
+        this.displayFrameStartedAt = performance.now();
+    }
+
+    applyInterpolatedDisplayFrame(now) {
+        if (!this.avatar || !this.displayFrameCurrent) return;
+        if (!this.displayFramePrevious) {
+            this.avatar.applyFrame(this.displayFrameCurrent, 1);
             return;
         }
 
-        const data = await response.json();
-        this.sessionId = data.session_id;
-        this.sessionValue.textContent = this.sessionId.slice(0, 6);
-        this.transcriptBox.textContent = data.transcript || 'audio stream disabled';
-        this.sceneBox.textContent = data.scene_context;
-        this.budgetValue.textContent = `${Math.round(data.budget_remaining_seconds)}s`;
-        this.frameCount = 0;
-        this.fpsCounter = 0;
-        this.skeleton.clearTrail();
-        this.stageTitle.textContent = 'Streaming motion endpoint';
-        this.connectMotion();
-        if (this.audioToggle.checked) this.connectAudio();
-        if (this.videoToggle.checked) this.connectVideo();
+        const alpha = Math.max(0, Math.min(1, (now - this.displayFrameStartedAt) / this.sourceFrameIntervalMs));
+        const prev = this.displayFramePrevious;
+        const curr = this.displayFrameCurrent;
+        const joints = new Float32Array(curr.joints.length);
+        for (let i = 0; i < joints.length; i++) {
+            joints[i] = prev.joints[i] * (1 - alpha) + curr.joints[i] * alpha;
+        }
+        const root = [
+            prev.root[0] * (1 - alpha) + curr.root[0] * alpha,
+            prev.root[1] * (1 - alpha) + curr.root[1] * alpha,
+            prev.root[2] * (1 - alpha) + curr.root[2] * alpha,
+        ];
+        this.avatar.applyFrame({ ...curr, root, joints }, 1);
+        this.currentRootPos.set(root[0], root[1], root[2]);
     }
 
-    connectMotion() {
-        this.motionSocket = new WebSocket(this.wsUrl(`/ws/motion/${this.sessionId}`));
-        this.connectionState.textContent = 'connecting';
-        this.motionSocket.onopen = () => {
-            this.connectionState.textContent = 'connected';
-            this.motionState.textContent = 'endpoint streaming';
-        };
-        this.motionSocket.onmessage = event => {
-            const data = JSON.parse(event.data);
-            if (data.type === 'motion_frame') {
-                this.motionState.textContent = 'endpoint streaming';
-                this.skeleton.updatePose(data.joints);
-                this.frameCount = data.frame_id;
-                this.fpsCounter += 1;
-                this.frameCountEl.textContent = this.frameCount;
-                this.budgetValue.textContent = `${Math.round(data.budget_remaining_seconds)}s`;
-                const root = data.joints[0];
-                this.lastRoot.set(root[0], root[1], root[2]);
-                this.updateFps();
-            } else if (data.type === 'pipeline_event') {
-                this.applyStage(data.stage);
-                this.log(data.stage, data.detail);
-            } else if (data.type === 'budget_exhausted') {
-                this.log('Budget', data.detail);
-                this.stop(false);
+    async updateText() {
+        if (!this.sessionId || this.inputMode !== 'online') return;
+        const text = this.motionText.value.trim();
+        if (!text) return;
+        try {
+            if (this.realtimeSocket && this.realtimeSocket.readyState === WebSocket.OPEN) {
+                this.realtimeSocket.send(JSON.stringify({ type: 'input_text.append', text }));
+            } else {
+                const response = await fetch(`/api/realtime/sessions/${this.sessionId}/input_text`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ text }),
+                });
+                if (!response.ok) throw new Error('Text update failed');
             }
-        };
-        this.motionSocket.onclose = () => {
-            this.connectionState.textContent = 'disconnected';
-            this.motionState.textContent = 'endpoint idle';
-        };
+            this.setStatus(this.isPaused ? 'Paused' : 'Streaming');
+        } catch (error) {
+            this.setStatus('Error');
+        }
     }
 
-    connectAudio() {
-        this.audioSocket = new WebSocket(this.wsUrl(`/ws/audio/${this.sessionId}`));
-        let sequence = 0;
-        this.audioSocket.onopen = () => {
-            this.asrState.textContent = 'endpoint streaming';
-            this.audioTimer = setInterval(() => {
-                sequence += 1;
-                const level = 0.45 + 0.38 * Math.sin(sequence * 0.38) + 0.1 * Math.sin(sequence * 0.91);
-                this.audioSocket.send(JSON.stringify({
-                    type: 'audio_chunk',
-                    sequence,
-                    level: Math.max(0, Math.min(1, level)),
-                }));
-            }, 250);
-        };
-        this.audioSocket.onmessage = event => {
-            const data = JSON.parse(event.data);
-            if (data.type === 'asr_partial') {
-                this.transcriptBox.textContent = data.text;
-                this.log('ASR', `partial transcript level ${data.level}`);
-            }
-        };
-        this.audioSocket.onclose = () => {
-            this.asrState.textContent = 'endpoint idle';
-        };
-    }
-
-    connectVideo() {
-        this.videoSocket = new WebSocket(this.wsUrl(`/ws/video/${this.sessionId}`));
-        let sequence = 0;
-        this.videoSocket.onopen = () => {
-            this.vlmState.textContent = 'endpoint streaming';
-            this.videoTimer = setInterval(() => {
-                sequence += 1;
-                const motionEnergy = 0.35 + 0.35 * Math.sin(sequence * 0.51 + 0.4);
-                this.videoSocket.send(JSON.stringify({
-                    type: 'video_keyframe',
-                    sequence,
-                    motion_energy: Math.max(0, Math.min(1, motionEnergy)),
-                }));
-            }, 850);
-        };
-        this.videoSocket.onmessage = event => {
-            const data = JSON.parse(event.data);
-            if (data.type === 'vlm_context') {
-                this.sceneBox.textContent = data.context;
-                this.log('VLM', `keyframe motion ${data.motion_energy}`);
-            }
-        };
-        this.videoSocket.onclose = () => {
-            this.vlmState.textContent = 'endpoint idle';
-        };
-    }
-
-    async updatePrompt() {
+    async togglePause() {
         if (!this.sessionId) return;
-        const response = await fetch(`/api/session/${this.sessionId}/text`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ text: this.promptInput.value }),
-        });
-        const data = await response.json();
-        this.log('Motion', 'prompt updated');
-        this.stageTitle.textContent = data.prompt.slice(0, 64);
+        const nextPaused = !this.isPaused;
+        try {
+            if (this.realtimeSocket && this.realtimeSocket.readyState === WebSocket.OPEN) {
+                this.realtimeSocket.send(JSON.stringify({ type: nextPaused ? 'session.pause' : 'session.resume' }));
+            }
+        } catch (error) {
+            this.setStatus('Error');
+        }
     }
 
-    async stop(callApi = true) {
-        clearInterval(this.audioTimer);
-        clearInterval(this.videoTimer);
-        this.audioTimer = null;
-        this.videoTimer = null;
-        for (const socket of [this.motionSocket, this.audioSocket, this.videoSocket]) {
-            if (socket && socket.readyState <= 1) socket.close();
-        }
-        if (callApi && this.sessionId) {
-            await fetch(`/api/session/${this.sessionId}/reset`, { method: 'POST' });
-        }
+    async reset(callApi = true) {
+        const sessionId = this.sessionId;
+        this.isRunning = false;
+        this.isPaused = false;
         this.sessionId = null;
-        this.setButtons(false);
-        this.connectionState.textContent = 'disconnected';
-        this.stageTitle.textContent = 'Waiting for motion endpoint';
-        this.sessionValue.textContent = 'idle';
-        this.asrState.textContent = 'endpoint idle';
-        this.vlmState.textContent = 'endpoint idle';
-        this.ttsState.textContent = 'endpoint idle';
-        this.motionState.textContent = 'endpoint idle';
-    }
-
-    setButtons(running) {
-        this.startBtn.disabled = running;
-        this.stopBtn.disabled = !running;
-        this.updateBtn.disabled = !running;
-    }
-
-    applyStage(stage) {
-        if (stage === 'ASR') this.asrState.textContent = 'endpoint ready';
-        if (stage === 'VLM') this.vlmState.textContent = 'endpoint ready';
-        if (stage === 'TTS') this.ttsState.textContent = 'endpoint ready';
-        if (stage === 'Motion') this.motionState.textContent = 'endpoint ready';
-    }
-
-    log(stage, detail) {
-        const row = document.createElement('div');
-        row.className = 'event-row';
-        row.innerHTML = `<span>${stage}</span><b>${detail}</b>`;
-        this.eventLog.prepend(row);
-        while (this.eventLog.children.length > 14) {
-            this.eventLog.removeChild(this.eventLog.lastChild);
+        this.closeSockets();
+        if (callApi && sessionId) {
+            try {
+                await fetch(`/api/realtime/sessions/${sessionId}/close`, { method: 'POST' });
+            } catch (error) {
+                // Reset is best-effort because closed sockets already stop the local view.
+            }
         }
+        this.setStatus('Idle');
+        this.frameCount = 0;
+        this.motionFpsCounter = 0;
+        this.displayFramePrevious = null;
+        this.displayFrameCurrent = null;
+        if (this.avatar) {
+            this.avatar.clearTrail();
+            this.avatar.setVisible(false);
+        }
+        this.updateFrameDisplay(0);
+        this.fpsEl.textContent = '0';
+        this.updateBufferDisplay(0, this.bufferCapacity);
+        this.setButtonState();
     }
 
-    updateFps() {
+    sendResetBeacon() {
+        if (!this.sessionId) return;
+        navigator.sendBeacon(`/api/realtime/sessions/${this.sessionId}/close`, new Blob([], { type: 'application/json' }));
+    }
+
+    closeSockets() {
+        if (this.realtimeSocket && this.realtimeSocket.readyState <= WebSocket.OPEN) {
+            if (this.realtimeSocket.readyState === WebSocket.OPEN) {
+                this.realtimeSocket.send(JSON.stringify({ type: 'session.close' }));
+            }
+            this.realtimeSocket.close();
+        }
+        this.realtimeSocket = null;
+    }
+
+    updateMotionFps() {
         const now = performance.now();
-        if (now - this.fpsUpdatedAt > 1000) {
-            this.fpsValue.textContent = this.fpsCounter;
-            this.fpsCounter = 0;
-            this.fpsUpdatedAt = now;
+        if (now - this.motionFpsUpdatedAt > 1000) {
+            this.fpsEl.textContent = String(this.motionFpsCounter);
+            this.motionFpsCounter = 0;
+            this.motionFpsUpdatedAt = now;
         }
+    }
+
+    updateFrameDisplay(frameId) {
+        this.frameCountEl.textContent = String(frameId);
+    }
+
+    updateBufferDisplay(size, capacity) {
+        const bufferSize = Number.isFinite(size) ? size : Math.min(this.bufferCapacity, this.frameCount);
+        const bufferCapacity = Number.isFinite(capacity) ? capacity : this.bufferCapacity;
+        this.bufferCapacity = bufferCapacity;
+        this.bufferSizeEl.textContent = `${Math.min(bufferSize, bufferCapacity)} / ${bufferCapacity}`;
+    }
+
+    openConfig() {
+        this.modalHistoryLength.value = String(this.historyLength);
+        this.modalSmoothingAlpha.value = String(this.smoothingAlpha);
+        this.modalSmoothingValue.textContent = this.smoothingAlpha.toFixed(2);
+        this.configModal.hidden = false;
+    }
+
+    closeConfig() {
+        this.configModal.hidden = true;
+    }
+
+    async saveConfig() {
+        const nextHistory = Math.max(1, Math.min(16, Number(this.modalHistoryLength.value) || 4));
+        const nextSmoothing = Math.max(0, Math.min(1, Number(this.modalSmoothingAlpha.value)));
+        const shouldRestart = this.isRunning;
+        this.historyLength = nextHistory;
+        this.smoothingAlpha = nextSmoothing;
+        this.syncConfigLabels();
+        this.closeConfig();
+        if (shouldRestart) {
+            await this.reset();
+            await this.start();
+        }
+    }
+
+    syncConfigLabels() {
+        this.currentSmoothingEl.textContent = this.smoothingAlpha.toFixed(2);
+        this.currentHistoryEl.textContent = String(this.historyLength);
+    }
+
+    setStatus(status) {
+        this.statusEl.textContent = status;
+    }
+
+    setControlsLocked(locked) {
+        this.startResetBtn.disabled = locked;
+        this.updateBtn.disabled = locked || !this.isRunning || this.inputMode !== 'online';
+        this.pauseResumeBtn.disabled = locked || !this.isRunning;
+        this.configBtn.disabled = false;
+    }
+
+    setButtonState() {
+        this.startResetBtn.disabled = false;
+        this.startResetBtn.textContent = this.isRunning ? 'Reset' : 'Start';
+        this.updateBtn.disabled = !this.isRunning || this.inputMode !== 'online';
+        this.pauseResumeBtn.disabled = !this.isRunning;
+        this.pauseResumeBtn.textContent = this.isPaused ? 'Resume' : 'Pause';
+        this.pauseResumeBtn.classList.toggle('btn-success', this.isPaused);
+        this.pauseResumeBtn.classList.toggle('btn-warning', !this.isPaused);
+        this.onlineModeBtn.disabled = this.isRunning;
+        this.offlineModeBtn.disabled = this.isRunning;
+        this.addCueBtn.disabled = this.isRunning;
+        this.offlineScheduleRows.querySelectorAll('input, button').forEach(element => {
+            element.disabled = this.isRunning;
+        });
     }
 
     animate() {
         requestAnimationFrame(() => this.animate());
-        this.controls.target.lerp(new THREE.Vector3(this.lastRoot.x, 0.9, this.lastRoot.z), 0.035);
-        this.keyLight.position.set(this.lastRoot.x + 4, 8, this.lastRoot.z + 5);
-        this.keyLight.target.position.set(this.lastRoot.x, 0, this.lastRoot.z);
+        const now = performance.now();
+        this.applyInterpolatedDisplayFrame(now);
+        if (now - this.lastUserInteraction > this.autoFollowDelay) {
+            this.controls.target.lerp(
+                new THREE.Vector3(this.currentRootPos.x, 0.9, this.currentRootPos.z),
+                0.035,
+            );
+        }
+        this.keyLight.position.set(this.currentRootPos.x + 5, 8, this.currentRootPos.z + 3);
+        this.keyLight.target.position.set(this.currentRootPos.x, 0, this.currentRootPos.z);
         this.keyLight.target.updateMatrixWorld();
         this.controls.update();
         this.renderer.render(this.scene, this.camera);
@@ -333,5 +654,5 @@ class FloodSceneApp {
 }
 
 window.addEventListener('DOMContentLoaded', () => {
-    window.floodSceneApp = new FloodSceneApp();
+    window.motionApp = new MotionApp();
 });

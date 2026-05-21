@@ -1,14 +1,17 @@
 ---
-title: FloodScene HF Endpoint Simulation
+title: FloodScene Realtime Motion API
 sdk: docker
 app_port: 7860
 ---
 
-# FloodScene HF Endpoint Simulation
+# FloodScene Realtime Motion API
 
-Local prototype for a FloodDiffusion-style streaming demo.
+Local FastAPI prototype for FloodDiffusion-style realtime motion streaming.
 
-The app intentionally does not load heavy models. ASR, VLM, TTS, and motion generation are represented by simulated HF Endpoint clients in `app.py`, so the browser flow can be tested before wiring real Hugging Face Endpoints.
+The browser opens a realtime session, receives binary motion frames over one
+WebSocket, and sends control/text events on that same socket. The visualization
+runtime is pluggable: Unitree G1 is the default mesh renderer, and SMPL-X remains
+available through the renderer registry.
 
 ## Run
 
@@ -18,18 +21,64 @@ uvicorn app:app --host 127.0.0.1 --port 7861
 
 Open `http://127.0.0.1:7861`.
 
-## Shape
+## Code Shape
 
-- Frontend: static HTML/CSS/Three.js.
-- Backend: FastAPI.
-- Streaming: WebSocket motion frames at 20 FPS.
-- Simulated inputs: audio chunks and video keyframes are sent to backend WebSockets.
-- Simulated HF Endpoint clients: ASR, VLM, TTS, and FloodDiffusion motion.
+- `app.py`: FastAPI routes, realtime session WebSocket, budget gate.
+- `api/`: Pydantic request schemas.
+- `sessions/`: session lifecycle, online/offline text state, schedule lookup.
+- `renderers/`: renderer registry and runtime adapters for `g1` and `smplx`.
+- `static/js/avatars/`: frontend avatar implementations.
+- `static/js/main.js`: UI state machine and realtime client.
 
-The next replacement point is to swap the fake clients for real endpoint clients while keeping the same session and WebSocket contract.
+## Realtime API
 
-## Hugging Face Space
+Create a session:
 
-This shape is meant for a Docker or CPU Space that calls external HF Inference Endpoints. It is not a ZeroGPU Space shape: ZeroGPU is for Gradio SDK Spaces, not this FastAPI/Docker app.
+```http
+POST /api/realtime/sessions
+```
 
-Multiple browser users get separate in-memory sessions and WebSockets in one Space process. The public budget counter is shared across all users in that process; for production, move budget/session state to Redis or a database and add a max-active-session gate.
+Online payload:
+
+```json
+{
+  "renderer": "g1",
+  "input_mode": "online",
+  "initial_text": "walk in a circle.",
+  "frame_rate": 20
+}
+```
+
+Offline payload:
+
+```json
+{
+  "renderer": "g1",
+  "input_mode": "offline",
+  "frame_rate": 20,
+  "schedule": [
+    { "text": "walk forward", "start": 0 },
+    { "text": "turn left", "start": 5 },
+    { "text": "wave hand", "start": 9, "end": 14 }
+  ]
+}
+```
+
+Connect to:
+
+```text
+ws://HOST/api/realtime/sessions/{session_id}
+```
+
+The WebSocket sends JSON lifecycle events plus binary motion frames. It accepts
+JSON control events:
+
+```json
+{ "type": "input_text.append", "text": "wave hand while walking" }
+{ "type": "session.pause" }
+{ "type": "session.resume" }
+{ "type": "session.close" }
+```
+
+Offline schedules require the first cue to start at `0`, strictly increasing cue
+starts, and an `end` time on the final cue.

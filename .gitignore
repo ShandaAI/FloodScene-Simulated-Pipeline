@@ -8,3 +8,5 @@ __pycache__/
 
 .DS_Store
 .screenshots/
+.smplx_cache/
+.g1_cache/

@@ -3,112 +3,137 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>FloodScene HF Endpoint Simulation</title>
+    <title>Motion Generation Demo</title>
     <link rel="stylesheet" href="/static/css/style.css">
 </head>
 <body>
-    <main class="app-shell">
-        <aside class="control-panel">
-            <header class="brand">
-                <div>
-                    <h1>FloodScene</h1>
-                    <p>FastAPI shell calling simulated HF Endpoints</p>
-                </div>
-                <span class="mode-badge">HF ENDPOINT SIM</span>
-            </header>
+    <main class="container">
+        <header class="header">
+            <h1>Motion Generation Demo</h1>
+        </header>
 
-            <section class="panel-section endpoint-flow">
-                <div class="section-title">Endpoint Flow</div>
-                <div class="flow-row"><span>Space backend</span><b>FastAPI</b></div>
-                <div class="flow-row"><span>ASR / VLM / TTS</span><b>HF Endpoint sim</b></div>
-                <div class="flow-row"><span>Motion</span><b>HF Endpoint sim</b></div>
-            </section>
-
-            <section class="panel-section">
-                <label class="field-label" for="promptInput">Motion prompt</label>
-                <textarea id="promptInput" rows="4">walk forward and wave to the camera</textarea>
-                <div class="toggle-grid">
-                    <label class="toggle-row">
-                        <input id="audioToggle" type="checkbox" checked>
-                        <span>Audio stream</span>
-                    </label>
-                    <label class="toggle-row">
-                        <input id="videoToggle" type="checkbox" checked>
-                        <span>Video stream</span>
-                    </label>
+        <section class="controls">
+            <div class="status-group">
+                <div class="status-item">
+                    <span class="status-label">Status:</span>
+                    <span id="status" class="status-value">Idle</span>
                 </div>
-                <div class="button-row">
-                    <button id="startBtn" class="primary-btn" type="button">
-                        <i data-lucide="play"></i>
-                        <span>Start</span>
-                    </button>
-                    <button id="stopBtn" class="tool-btn" type="button" disabled>
-                        <i data-lucide="square"></i>
-                        <span>Stop</span>
-                    </button>
-                    <button id="updateBtn" class="tool-btn" type="button" disabled>
-                        <i data-lucide="refresh-cw"></i>
-                        <span>Update</span>
-                    </button>
+                <div class="status-item">
+                    <span class="status-label">Buffer:</span>
+                    <span id="bufferSize" class="status-value">0 / 4</span>
                 </div>
-            </section>
-
-            <section class="panel-section metric-grid">
-                <div class="metric">
-                    <span>Frames</span>
-                    <strong id="frameCount">0</strong>
+                <div class="status-item">
+                    <span class="status-label">Motion FPS:</span>
+                    <span id="fps" class="status-value">0</span>
                 </div>
-                <div class="metric">
-                    <span>Motion FPS</span>
-                    <strong id="fpsValue">0</strong>
+                <div class="status-item">
+                    <span class="status-label">Frames:</span>
+                    <span id="frameCount" class="status-value">0</span>
                 </div>
-                <div class="metric">
-                    <span>Budget</span>
-                    <strong id="budgetValue">-</strong>
+                <div class="status-item">
+                    <span class="status-label">Smoothing α:</span>
+                    <span id="currentSmoothing" class="status-value">0.50</span>
                 </div>
-                <div class="metric">
-                    <span>Session</span>
-                    <strong id="sessionValue">idle</strong>
+                <div class="status-item">
+                    <span class="status-label">History:</span>
+                    <span id="currentHistory" class="status-value">4</span>
                 </div>
-            </section>
-
-            <section class="panel-section endpoint-list">
-                <div class="section-title">Endpoint Clients</div>
-                <div class="endpoint-row"><span>ASR</span><b id="asrState">endpoint idle</b></div>
-                <div class="endpoint-row"><span>VLM</span><b id="vlmState">endpoint idle</b></div>
-                <div class="endpoint-row"><span>TTS</span><b id="ttsState">endpoint idle</b></div>
-                <div class="endpoint-row"><span>Motion</span><b id="motionState">endpoint idle</b></div>
-            </section>
-
-            <section class="panel-section">
-                <div class="section-title">Live Context</div>
-                <div id="transcriptBox" class="context-box">ASR endpoint transcript will appear here.</div>
-                <div id="sceneBox" class="context-box">VLM endpoint scene context will appear here.</div>
-            </section>
-        </aside>
-
-        <section class="stage-panel">
-            <div class="stage-toolbar">
-                <div>
-                    <span class="stage-kicker">Three.js Motion Stream</span>
-                    <h2 id="stageTitle">Waiting for motion endpoint</h2>
-                </div>
-                <div id="connectionState" class="connection-pill">disconnected</div>
             </div>
-            <div id="canvas-container">
-                <div class="canvas-watermark">HF ENDPOINT SIM</div>
-                <canvas id="renderCanvas"></canvas>
+
+            <div class="input-mode-group" role="group" aria-label="Input mode">
+                <button id="onlineModeBtn" class="mode-btn active" type="button">Online</button>
+                <button id="offlineModeBtn" class="mode-btn" type="button">Offline</button>
             </div>
-            <div class="timeline-strip">
-                <div id="eventLog" class="event-log"></div>
+
+            <div id="onlineInputPanel" class="input-panel">
+                <div class="input-group">
+                    <label for="motionText">Online Text:</label>
+                    <input
+                        id="motionText"
+                        type="text"
+                        placeholder="Type text and press Enter"
+                        value="walk in a circle."
+                    >
+                </div>
             </div>
+
+            <div id="offlineInputPanel" class="input-panel offline-panel" hidden>
+                <div class="offline-schedule-header">
+                    <span>Offline Text Schedule</span>
+                    <button id="addCueBtn" class="btn btn-compact" type="button">Add Cue</button>
+                </div>
+                <div id="offlineScheduleRows" class="offline-schedule"></div>
+            </div>
+
+            <div class="button-group">
+                <button id="startResetBtn" class="btn btn-primary" type="button">Start</button>
+                <button id="updateBtn" class="btn btn-secondary" type="button" disabled>Send Text</button>
+                <button id="pauseResumeBtn" class="btn btn-warning" type="button" disabled>Pause</button>
+                <button id="configBtn" class="btn" type="button">Config</button>
+            </div>
+
+        </section>
+
+        <section id="canvas-container" aria-label="Streaming motion viewer">
+            <canvas id="renderCanvas"></canvas>
+        </section>
+
+        <section class="info">
+            <div class="description-box">
+                <strong>Start/Reset:</strong> Start when idle, reset when running and open a new realtime session.
+                <strong>Send Text:</strong> In Online mode, press Enter or send text while streaming.
+                <strong>Pause/Resume:</strong> Pause or resume generation while preserving state.
+            </div>
+            <p class="note">
+                Online mode streams text updates immediately. Offline mode sends a text timeline at session creation. Target Motion FPS: 20. Use mouse to orbit camera.
+            </p>
         </section>
     </main>
 
+    <div id="configModal" class="modal-overlay" hidden>
+        <div class="modal-content" role="dialog" aria-modal="true" aria-labelledby="configTitle">
+            <div class="modal-header">
+                <h2 id="configTitle">Config Editor</h2>
+            </div>
+            <div class="modal-body">
+                <section class="config-section">
+                    <h3>Schedule Config</h3>
+                    <div id="scheduleConfigFields"></div>
+                </section>
+                <section class="config-section">
+                    <h3>CFG Config</h3>
+                    <div id="cfgConfigFields"></div>
+                </section>
+                <section class="config-section">
+                    <h3>Runtime Parameters</h3>
+                    <div class="config-field">
+                        <label for="modalHistoryLength">History Length</label>
+                        <input id="modalHistoryLength" type="number" min="1" max="16" value="4">
+                    </div>
+                    <div class="config-field">
+                        <label for="modalSmoothingAlpha">Smoothing α</label>
+                        <div class="slider-container">
+                            <input id="modalSmoothingAlpha" type="range" min="0" max="1" step="0.05" value="1">
+                            <span id="modalSmoothingValue" class="slider-value">1.00</span>
+                        </div>
+                        <span class="param-hint">0.0 = max smoothing, 1.0 = no smoothing</span>
+                    </div>
+                </section>
+            </div>
+            <div class="modal-footer">
+                <button id="configDiscardBtn" class="btn btn-secondary" type="button">Discard</button>
+                <button id="configSaveBtn" class="btn btn-primary" type="button">Update &amp; Reset</button>
+            </div>
+        </div>
+    </div>
+
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
-    <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
-    <script src="/static/js/skeleton.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/STLLoader.js"></script>
+    <script src="/static/js/avatars/base-avatar.js"></script>
+    <script src="/static/js/avatars/g1-avatar.js"></script>
+    <script src="/static/js/avatars/smplx-avatar.js"></script>
+    <script src="/static/js/avatars/avatar-factory.js"></script>
     <script src="/static/js/main.js"></script>
 </body>
 </html>
