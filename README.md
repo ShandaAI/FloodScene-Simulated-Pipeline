@@ -26,12 +26,12 @@ Open `http://127.0.0.1:7861`.
 Large model and mesh assets are not committed. Put them in the ignored cache
 folders below when setting up a new machine.
 
-- SMPL-X body model for the local renderer:
-  `.smplx_cache/SMPLX_NEUTRAL_2020.npz`. Download the neutral NPZ body model
-  from the official SMPL-X download page after logging in:
-  `https://smpl-x.is.tue.mpg.de/download.php`. The renderer uses neutral
-  gender with all-zero betas. On the motion server, an existing fallback path is
-  `/mnt/data/cpfs/motion_data/smplx_models/smplx/SMPLX_NEUTRAL_2020.npz`.
+- SMPL-X body model for the local renderer: the repo-local cache path is
+  `.smplx_cache/SMPLX_NEUTRAL_2020.npz`, and the renderer uses neutral gender
+  with all-zero betas. Existing local copies under `/mnt/data/cpfs/motion_data`
+  are:
+  - `/mnt/data/cpfs/motion_data/smplx_models/smplx/SMPLX_NEUTRAL_2020.npz`
+  - `/mnt/data/cpfs/motion_data/smplx_models/smplx/SMPLX_NEUTRAL.npz`
 - Kimodo SMPL-X checkpoint, if SMPL-X generation is enabled later:
   `https://huggingface.co/nvidia/Kimodo-SMPLX-RP-v1`. This model is gated; see
   NVIDIA's Kimodo SMPL-X setup note:
