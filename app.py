@@ -14,7 +14,12 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
 from api.schemas import CreateRealtimeSessionRequest, InputTextRequest
-from integrations.kimodo_g1_client import KimodoG1Client, KimodoG1Error
+from integrations.kimodo_g1_client import (
+    GeneratedG1Frame,
+    GeneratedG1Segment,
+    KimodoG1Client,
+    KimodoG1Error,
+)
 from renderers import DEFAULT_RENDERER, RenderInput, build_renderer_registry
 from sessions import MotionSession, MotionSessionManager
 
@@ -244,6 +249,10 @@ async def _stream_kimodo_g1_offline(
     send_bytes: Callable[[bytes], Awaitable[None]],
 ) -> None:
     assert kimodo_g1_client is not None
+    if len(session.schedule) > 1:
+        await _stream_kimodo_g1_offline_sequence(session, renderer, send_json, send_bytes)
+        return
+
     started_at = time.time()
     await send_json(
         {
@@ -366,6 +375,190 @@ async def _stream_kimodo_g1_offline(
                 "frames": streamed_frames,
                 "duration": round(streamed_seconds, 3),
                 "generation_seconds": round(motion.generation_seconds, 3),
+                "wall_seconds": round(time.time() - started_at, 3),
+            }
+        )
+        await send_json(
+            {
+                "type": "offline_schedule.completed",
+                "session_id": session.session_id,
+                "elapsed": round(streamed_seconds, 3),
+            }
+        )
+        await asyncio.sleep(0.1)
+
+
+async def _stream_kimodo_g1_offline_sequence(
+    session: MotionSession,
+    renderer: Any,
+    send_json: Callable[[dict[str, Any]], Awaitable[None]],
+    send_bytes: Callable[[bytes], Awaitable[None]],
+) -> None:
+    assert kimodo_g1_client is not None
+    started_at = time.time()
+    await send_json(
+        {
+            "type": "motion_generation.started",
+            "session_id": session.session_id,
+            "renderer": "g1",
+            "provider": "kimodo",
+            "mode": "sequence",
+        }
+    )
+
+    queue: asyncio.Queue[Any] = asyncio.Queue()
+    loop = asyncio.get_running_loop()
+
+    def produce_frames() -> None:
+        try:
+            for item in kimodo_g1_client.generate_offline_sequence_frames(session.schedule):
+                loop.call_soon_threadsafe(queue.put_nowait, item)
+        except Exception as exc:  # noqa: BLE001 - surfaced to websocket client.
+            loop.call_soon_threadsafe(queue.put_nowait, exc)
+        finally:
+            loop.call_soon_threadsafe(queue.put_nowait, None)
+
+    producer_task = asyncio.create_task(asyncio.to_thread(produce_frames))
+
+    global budget_used_seconds
+    stream_completed = True
+    streamed_frames = 0
+    streamed_seconds = 0.0
+    generation_seconds = 0.0
+    segment_count = 0
+
+    async def stream_segment(segment: GeneratedG1Segment) -> None:
+        global budget_used_seconds
+        nonlocal streamed_frames, streamed_seconds, generation_seconds, segment_count
+        segment_count += 1
+        generation_seconds += segment.generation_seconds
+        await send_json(
+            {
+                "type": "motion_generation.segment_completed",
+                "session_id": session.session_id,
+                "renderer": "g1",
+                "provider": "kimodo",
+                "segment_index": segment.segment_index,
+                "text": segment.text,
+                "frames": segment.num_frames,
+                "target_frames": segment.target_frames,
+                "generated_frames": segment.generated_frames,
+                "output_frames": segment.output_frames,
+                "next_start_frames": segment.next_start_frames,
+                "fps": round(segment.fps, 3),
+                "generation_seconds": round(segment.generation_seconds, 3),
+                "received_seconds": round(segment.received_seconds, 3),
+            }
+        )
+
+        if segment.segment_index != session.last_cue_index:
+            session.current_text = segment.text
+            session.last_cue_index = segment.segment_index
+            await send_json(
+                {
+                    "type": "offline_cue.changed",
+                    "session_id": session.session_id,
+                    "cue_index": segment.segment_index,
+                    "text": segment.text,
+                    "elapsed": round(streamed_seconds, 3),
+                }
+            )
+
+    async def stream_frame(frame: GeneratedG1Frame) -> bool:
+        global budget_used_seconds
+        nonlocal streamed_frames, streamed_seconds
+        if not session.running:
+            return False
+        while session.paused and session.running:
+            await asyncio.sleep(0.05)
+        if not session.running:
+            return False
+        if _budget_remaining() <= 0:
+            await send_json({"type": "budget_exhausted", "detail": "Public demo budget exhausted for this Space."})
+            session.running = False
+            return False
+
+        session.frame_id += 1
+        await send_bytes(
+            renderer.binary_frame_from_arrays(
+                joints=frame.posed_joints,
+                global_rots=frame.global_rot_mats,
+                root_position=frame.root_position,
+                frame_id=session.frame_id,
+                audio_level=session.audio_level,
+                video_energy=session.video_energy,
+                budget_remaining=round(_budget_remaining(), 2),
+                buffer_size=min(4, max(1, queue.qsize())),
+                buffer_capacity=4,
+            )
+        )
+        frame_interval = 1.0 / frame.fps
+        streamed_frames += 1
+        streamed_seconds += frame_interval
+        async with budget_lock:
+            budget_used_seconds += frame_interval
+        await asyncio.sleep(frame_interval)
+        return True
+
+    while session.running:
+        try:
+            item = await asyncio.wait_for(queue.get(), timeout=0.1)
+        except asyncio.TimeoutError:
+            if producer_task.done() and queue.empty():
+                break
+            continue
+
+        if item is None:
+            break
+        if isinstance(item, KimodoG1Error):
+            session.running = False
+            stream_completed = False
+            await send_json(
+                {
+                    "type": "error",
+                    "code": "kimodo_g1_generation_failed",
+                    "message": str(item),
+                }
+            )
+            break
+        if isinstance(item, Exception):
+            session.running = False
+            stream_completed = False
+            await send_json(
+                {
+                    "type": "error",
+                    "code": "kimodo_g1_generation_failed",
+                    "message": str(item),
+                }
+            )
+            break
+        if isinstance(item, GeneratedG1Segment):
+            await stream_segment(item)
+            continue
+        if not isinstance(item, GeneratedG1Frame):
+            continue
+        if not await stream_frame(item):
+            stream_completed = False
+            break
+
+    if not producer_task.done() and not session.running:
+        producer_task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await producer_task
+
+    if stream_completed:
+        await asyncio.sleep(0.05)
+        await send_json(
+            {
+                "type": "motion_generation.completed",
+                "session_id": session.session_id,
+                "renderer": "g1",
+                "provider": "kimodo",
+                "mode": "sequence",
+                "segments": segment_count,
+                "frames": streamed_frames,
+                "duration": round(streamed_seconds, 3),
+                "generation_seconds": round(generation_seconds, 3),
                 "wall_seconds": round(time.time() - started_at, 3),
             }
         )

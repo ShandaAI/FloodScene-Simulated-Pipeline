@@ -10,6 +10,8 @@ class MotionApp {
         this.frameCount = 0;
         this.motionFpsCounter = 0;
         this.motionFpsUpdatedAt = performance.now();
+        this.timerStartedAt = null;
+        this.timerStoppedAt = null;
         this.bufferCapacity = 4;
         this.historyLength = 4;
         this.smoothingAlpha = 1.0;
@@ -24,9 +26,8 @@ class MotionApp {
         this.meshReadyPromise = Promise.resolve();
         this.config = null;
         this.offlineCueRows = [
-            { text: 'walk forward', start: 0, end: '' },
-            { text: 'turn left', start: 5, end: '' },
-            { text: 'wave hand', start: 9, end: 14 },
+            { text: '江南style 跳舞', start: 0, end: '' },
+            { text: '鞠躬', start: 8, end: 12 },
         ];
 
         this.bindElements();
@@ -41,6 +42,7 @@ class MotionApp {
         this.bufferSizeEl = document.getElementById('bufferSize');
         this.fpsEl = document.getElementById('fps');
         this.frameCountEl = document.getElementById('frameCount');
+        this.elapsedTimeEl = document.getElementById('elapsedTime');
         this.currentSmoothingEl = document.getElementById('currentSmoothing');
         this.currentHistoryEl = document.getElementById('currentHistory');
         this.motionText = document.getElementById('motionText');
@@ -301,6 +303,7 @@ class MotionApp {
     async start() {
         this.setStatus('Loading');
         this.setControlsLocked(true);
+        this.startTimer();
 
         try {
             await this.meshReadyPromise;
@@ -335,6 +338,7 @@ class MotionApp {
 
             if (!response.ok) {
                 const error = await response.json();
+                this.stopTimer();
                 this.setStatus(error.detail || 'Error');
                 this.setControlsLocked(false);
                 return;
@@ -347,6 +351,7 @@ class MotionApp {
             this.connectRealtime();
             this.setButtonState();
         } catch (error) {
+            this.stopTimer();
             this.setStatus(error.message || 'Error');
             this.setControlsLocked(false);
         }
@@ -372,7 +377,10 @@ class MotionApp {
         socket.onclose = () => {
             if (this.realtimeSocket !== socket) return;
             this.realtimeSocket = null;
-            if (this.isRunning) this.setStatus('Idle');
+            if (this.isRunning) {
+                this.stopTimer();
+                this.setStatus('Idle');
+            }
         };
     }
 
@@ -399,13 +407,16 @@ class MotionApp {
             this.isRunning = false;
             this.isPaused = false;
             this.sessionId = null;
+            this.stopTimer();
             this.closeSockets();
             this.setButtonState();
             this.setStatus('Complete');
         } else if (data.type === 'budget_exhausted') {
+            this.stopTimer();
             this.setStatus('Budget');
             this.reset(false);
         } else if (data.type === 'error') {
+            this.stopTimer();
             this.setStatus(data.code || 'Error');
         }
     }
@@ -514,6 +525,7 @@ class MotionApp {
         this.isPaused = false;
         this.sessionId = null;
         this.closeSockets();
+        this.clearTimer();
         if (callApi && sessionId) {
             try {
                 await fetch(`/api/realtime/sessions/${sessionId}/close`, { method: 'POST' });
@@ -605,6 +617,36 @@ class MotionApp {
         this.statusEl.textContent = status;
     }
 
+    startTimer() {
+        this.timerStartedAt = performance.now();
+        this.timerStoppedAt = null;
+        this.updateElapsedDisplay();
+    }
+
+    stopTimer() {
+        if (this.timerStartedAt !== null && this.timerStoppedAt === null) {
+            this.timerStoppedAt = performance.now();
+            this.updateElapsedDisplay();
+        }
+    }
+
+    clearTimer() {
+        this.timerStartedAt = null;
+        this.timerStoppedAt = null;
+        this.updateElapsedDisplay();
+    }
+
+    updateElapsedDisplay(now = performance.now()) {
+        if (!this.elapsedTimeEl) return;
+        if (this.timerStartedAt === null) {
+            this.elapsedTimeEl.textContent = '0.00s';
+            return;
+        }
+        const end = this.timerStoppedAt ?? now;
+        const seconds = Math.max(0, (end - this.timerStartedAt) / 1000);
+        this.elapsedTimeEl.textContent = `${seconds.toFixed(2)}s`;
+    }
+
     setControlsLocked(locked) {
         this.startResetBtn.disabled = locked;
         this.updateBtn.disabled = locked || !this.isRunning || this.inputMode !== 'online';
@@ -631,6 +673,9 @@ class MotionApp {
     animate() {
         requestAnimationFrame(() => this.animate());
         const now = performance.now();
+        if (this.timerStartedAt !== null && this.timerStoppedAt === null) {
+            this.updateElapsedDisplay(now);
+        }
         this.applyInterpolatedDisplayFrame(now);
         if (now - this.lastUserInteraction > this.autoFollowDelay) {
             this.controls.target.lerp(

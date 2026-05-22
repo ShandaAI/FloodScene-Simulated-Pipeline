@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import time
@@ -58,6 +59,35 @@ class GeneratedG1Chunk:
     @property
     def duration_seconds(self) -> float:
         return self.num_frames / self.fps if self.fps > 0 else 0.0
+
+
+@dataclass(frozen=True)
+class GeneratedG1Segment:
+    segment_index: int
+    text: str
+    fps: float
+    generation_seconds: float
+    received_seconds: float
+    target_frames: int
+    generated_frames: int
+    output_frames: int
+    next_start_frames: int
+
+    @property
+    def num_frames(self) -> int:
+        return self.output_frames
+
+
+@dataclass(frozen=True)
+class GeneratedG1Frame:
+    segment_index: int
+    text: str
+    frame_index: int
+    fps: float
+    posed_joints: np.ndarray
+    global_rot_mats: np.ndarray
+    root_position: np.ndarray
+    received_seconds: float
 
 
 class KimodoG1Client:
@@ -143,6 +173,18 @@ class KimodoG1Client:
         started_at = time.perf_counter()
         yield from self._post_ndjson("/v1/g1/generate_sequence", payload, started_at)
 
+    def generate_offline_sequence_frames(self, schedule: Iterable[Any]) -> Iterable[GeneratedG1Segment | GeneratedG1Frame]:
+        segments = self._sequence_segments(schedule)
+        payload: dict[str, Any] = {
+            "segments": segments,
+            "diffusion_steps": self.diffusion_steps,
+        }
+        if self.seed is not None:
+            payload["seed"] = self.seed
+
+        started_at = time.perf_counter()
+        yield from self._post_frame_ndjson("/v1/g1/generate_sequence_frames", payload, started_at)
+
     def _post_json(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         request = urllib.request.Request(
             f"{self.base_url}{path}",
@@ -206,6 +248,48 @@ class KimodoG1Client:
         except TimeoutError as exc:
             raise KimodoG1Error("Kimodo G1 API request timed out.") from exc
 
+    def _post_frame_ndjson(
+        self,
+        path: str,
+        payload: dict[str, Any],
+        started_at: float,
+    ) -> Iterable[GeneratedG1Segment | GeneratedG1Frame]:
+        request = urllib.request.Request(
+            f"{self.base_url}{path}",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json", "Accept": "application/x-ndjson"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
+                for raw_line in response:
+                    line = raw_line.decode("utf-8").strip()
+                    if not line:
+                        continue
+                    try:
+                        event = json.loads(line)
+                    except json.JSONDecodeError as exc:
+                        raise KimodoG1Error("Kimodo G1 API returned invalid frame NDJSON.") from exc
+                    if not isinstance(event, dict):
+                        raise KimodoG1Error("Kimodo G1 API returned an unexpected frame stream event.")
+                    event_type = event.get("type")
+                    if event_type == "error":
+                        raise KimodoG1Error(str(event.get("detail", "Kimodo G1 frame stream failed.")))
+                    received_seconds = time.perf_counter() - started_at
+                    if event_type == "segment.completed":
+                        yield self._decode_segment_event(event, received_seconds)
+                    elif event_type == "frame":
+                        yield self._decode_frame_event(event, received_seconds)
+                    elif event_type == "sequence.completed":
+                        return
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            raise KimodoG1Error(f"Kimodo G1 API returned HTTP {exc.code}: {detail}") from exc
+        except urllib.error.URLError as exc:
+            raise KimodoG1Error(f"Kimodo G1 API is unreachable: {exc.reason}") from exc
+        except TimeoutError as exc:
+            raise KimodoG1Error("Kimodo G1 API frame stream timed out.") from exc
+
     @staticmethod
     def _cue_payload(cue: Any) -> dict[str, Any]:
         item = {
@@ -216,6 +300,21 @@ class KimodoG1Client:
         if end is not None:
             item["end"] = float(end)
         return item
+
+    @staticmethod
+    def _sequence_segments(schedule: Iterable[Any]) -> list[dict[str, Any]]:
+        cues = list(schedule)
+        segments = []
+        for cue in cues:
+            start = float(getattr(cue, "start"))
+            end = getattr(cue, "end", None)
+            if end is None:
+                raise KimodoG1Error("Offline sequence cues must include end times.")
+            duration = float(end) - start
+            if duration <= 0:
+                raise KimodoG1Error("Offline sequence cue duration must be positive.")
+            segments.append({"text": str(getattr(cue, "text")), "duration": duration})
+        return segments
 
     @staticmethod
     def _decode_motion(data: dict[str, Any], wall_seconds: float) -> GeneratedG1Motion:
@@ -295,4 +394,48 @@ class KimodoG1Client:
             generated_frames=int(chunk.get("generated_frames", joints.shape[0])),
             output_frames=int(chunk.get("output_frames", joints.shape[0])),
             next_start_frames=int(chunk.get("next_start_frames", 0)),
+        )
+
+    @staticmethod
+    def _decode_segment_event(event: dict[str, Any], received_seconds: float) -> GeneratedG1Segment:
+        fps = float(event.get("fps", 30.0))
+        if fps <= 0:
+            raise KimodoG1Error("Kimodo G1 frame stream returned a non-positive FPS.")
+        return GeneratedG1Segment(
+            segment_index=int(event.get("index", -1)),
+            text=str(event.get("text", "")),
+            fps=fps,
+            generation_seconds=float(event.get("generation_seconds", 0.0)),
+            received_seconds=received_seconds,
+            target_frames=int(event.get("target_frames", 0)),
+            generated_frames=int(event.get("generated_frames", 0)),
+            output_frames=int(event.get("output_frames", 0)),
+            next_start_frames=int(event.get("next_start_frames", 0)),
+        )
+
+    @staticmethod
+    def _decode_frame_event(event: dict[str, Any], received_seconds: float) -> GeneratedG1Frame:
+        raw_data = event.get("data")
+        if not isinstance(raw_data, str):
+            raise KimodoG1Error("Kimodo G1 frame event is missing frame data.")
+        values = np.frombuffer(base64.b64decode(raw_data), dtype=np.float32).copy()
+        expected = 34 * 3 + 34 * 9 + 3
+        if values.shape != (expected,):
+            raise KimodoG1Error(f"Unexpected G1 frame payload shape: {values.shape}.")
+        joint_end = 34 * 3
+        rot_end = joint_end + 34 * 9
+        joints = values[:joint_end].reshape(34, 3)
+        rotations = values[joint_end:rot_end].reshape(34, 3, 3)
+        root_position = values[rot_end:].reshape(3)
+        if not np.isfinite(joints).all() or not np.isfinite(rotations).all() or not np.isfinite(root_position).all():
+            raise KimodoG1Error("Kimodo G1 frame stream returned non-finite values.")
+        return GeneratedG1Frame(
+            segment_index=int(event.get("index", -1)),
+            text=str(event.get("text", "")),
+            frame_index=int(event.get("frame_index", -1)),
+            fps=float(event.get("fps", 30.0)),
+            posed_joints=joints,
+            global_rot_mats=rotations,
+            root_position=root_position,
+            received_seconds=received_seconds,
         )
