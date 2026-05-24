@@ -544,9 +544,9 @@ a:hover {
 
 .multi-grid {
     display: grid;
-    grid-template-columns: repeat(4, minmax(240px, 1fr));
-    gap: 12px;
-    padding: 16px;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 8px;
+    padding: 10px;
     border-top: 1px solid #e0e0e0;
     background: #f6f6f6;
 }
@@ -566,10 +566,10 @@ a:hover {
     min-width: 0;
     align-items: center;
     justify-content: space-between;
-    gap: 8px;
-    padding: 8px 10px;
+    gap: 6px;
+    padding: 7px 8px;
     color: #555555;
-    font-size: 0.82rem;
+    font-size: 0.78rem;
     font-weight: 600;
 }
 
@@ -604,13 +604,13 @@ a:hover {
 .multi-canvas {
     display: block;
     width: 100%;
-    height: clamp(220px, 22vw, 310px);
+    height: clamp(160px, 16vw, 260px);
     background: #ffffff;
 }
 
 @media (max-width: 1120px) {
-    .multi-grid {
-        grid-template-columns: repeat(2, minmax(240px, 1fr));
+    .multi-container {
+        max-width: none;
     }
 }
 
@@ -624,8 +624,7 @@ a:hover {
     }
 
     .multi-status-group,
-    .multi-form,
-    .multi-grid {
+    .multi-form {
         grid-template-columns: 1fr;
     }
 
@@ -634,7 +633,7 @@ a:hover {
     }
 
     .multi-canvas {
-        height: 260px;
+        height: 170px;
     }
 }
 

@@ -266,7 +266,7 @@ class MultiGridCell {
 
     resize() {
         const width = Math.max(1, this.canvas.clientWidth || this.element.getBoundingClientRect().width);
-        const height = Math.max(220, Math.min(310, width * 0.58));
+        const height = Math.max(160, Math.min(260, width * 0.58));
         this.canvas.style.height = `${height}px`;
         this.camera.aspect = width / height;
         this.camera.updateProjectionMatrix();
