@@ -519,6 +519,125 @@ a:hover {
     min-width: 140px;
 }
 
+.multi-container {
+    max-width: 1720px;
+}
+
+.multi-controls {
+    padding-bottom: 18px;
+}
+
+.multi-status-group {
+    grid-template-columns: repeat(4, minmax(120px, 1fr));
+}
+
+.multi-form {
+    display: grid;
+    grid-template-columns: minmax(260px, 1fr) minmax(120px, 170px) minmax(150px, 220px);
+    gap: 12px;
+    align-items: end;
+}
+
+.multi-form .input-group {
+    margin-bottom: 10px;
+}
+
+.multi-grid {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(240px, 1fr));
+    gap: 12px;
+    padding: 16px;
+    border-top: 1px solid #e0e0e0;
+    background: #f6f6f6;
+}
+
+.multi-cell {
+    display: grid;
+    min-width: 0;
+    overflow: hidden;
+    border: 1px solid #dedede;
+    border-radius: 8px;
+    background: #ffffff;
+}
+
+.multi-cell-header,
+.multi-cell-footer {
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 8px 10px;
+    color: #555555;
+    font-size: 0.82rem;
+    font-weight: 600;
+}
+
+.multi-cell-header {
+    border-bottom: 1px solid #eeeeee;
+}
+
+.multi-cell-footer {
+    border-top: 1px solid #eeeeee;
+}
+
+.multi-cell-title,
+.multi-cell-status,
+.multi-cell-frames,
+.multi-cell-seed {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.multi-cell-title {
+    color: #000000;
+}
+
+.multi-cell-seed,
+.multi-cell-frames {
+    color: #888888;
+    font-variant-numeric: tabular-nums;
+}
+
+.multi-canvas {
+    display: block;
+    width: 100%;
+    height: clamp(220px, 22vw, 310px);
+    background: #ffffff;
+}
+
+@media (max-width: 1120px) {
+    .multi-grid {
+        grid-template-columns: repeat(2, minmax(240px, 1fr));
+    }
+}
+
+@media (max-width: 760px) {
+    body {
+        padding: 10px;
+    }
+
+    .controls {
+        padding: 18px;
+    }
+
+    .multi-status-group,
+    .multi-form,
+    .multi-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .offline-cue-row {
+        grid-template-columns: 1fr;
+    }
+
+    .multi-canvas {
+        height: 260px;
+    }
+}
+
 @media (max-width: 768px) {
     body {
         padding: 12px;

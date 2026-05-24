@@ -17,6 +17,7 @@ class MotionSession:
     schedule: list[TextCue] = field(default_factory=list)
     frame_rate: int = 20
     seed: int | None = None
+    kimodo_worker_index: int | None = None
     created_at: float = field(default_factory=time.time)
     running: bool = True
     paused: bool = False

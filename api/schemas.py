@@ -23,6 +23,7 @@ class CreateRealtimeSessionRequest(BaseModel):
     schedule: list[TextCueRequest] = Field(default_factory=list)
     frame_rate: int = Field(default=20, ge=1, le=60)
     seed: int | None = Field(default=None, ge=0, le=2_147_483_647)
+    kimodo_worker_index: int | None = Field(default=None, ge=0, le=31)
 
 
 class InputTextRequest(BaseModel):

@@ -37,7 +37,8 @@ renderers = build_renderer_registry(BASE_DIR)
 session_manager = MotionSessionManager(renderers, DEFAULT_RENDERER)
 g1_runtime = renderers["g1"]
 smplx_runtime = renderers["smplx"]
-kimodo_g1_client = KimodoG1Client.from_env()
+kimodo_g1_clients = KimodoG1Client.from_env_pool()
+kimodo_g1_client = kimodo_g1_clients[0] if kimodo_g1_clients else None
 
 budget_used_seconds = 0.0
 budget_lock = asyncio.Lock()
@@ -45,6 +46,18 @@ budget_lock = asyncio.Lock()
 
 def _budget_remaining() -> float:
     return max(0.0, PUBLIC_DAILY_BUDGET_SECONDS - budget_used_seconds)
+
+
+def _kimodo_client_for_index(worker_index: int | None) -> KimodoG1Client | None:
+    if not kimodo_g1_clients:
+        return None
+    if worker_index is None:
+        return kimodo_g1_clients[0]
+    return kimodo_g1_clients[worker_index % len(kimodo_g1_clients)]
+
+
+def _kimodo_client_for_session(session: MotionSession) -> KimodoG1Client | None:
+    return _kimodo_client_for_index(session.kimodo_worker_index)
 
 
 def _motion_format(renderer_name: str) -> dict[str, Any]:
@@ -78,6 +91,7 @@ def _session_payload(session: MotionSession) -> dict[str, Any]:
         ],
         "frame_rate": session.frame_rate,
         "seed": session.seed,
+        "kimodo_worker_index": session.kimodo_worker_index,
         "websocket_url": f"/api/realtime/sessions/{session.session_id}",
     }
 
@@ -86,6 +100,7 @@ def _create_session(payload: CreateRealtimeSessionRequest) -> MotionSession:
     if _budget_remaining() <= 0:
         raise HTTPException(status_code=429, detail="Public demo budget exhausted for this Space.")
 
+    selected_client = _kimodo_client_for_index(payload.kimodo_worker_index)
     try:
         session = session_manager.create(
             renderer_name=payload.renderer,
@@ -93,7 +108,8 @@ def _create_session(payload: CreateRealtimeSessionRequest) -> MotionSession:
             initial_text=payload.initial_text,
             schedule=payload.schedule,
             frame_rate=payload.frame_rate,
-            seed=payload.seed if payload.seed is not None else (kimodo_g1_client.seed if kimodo_g1_client else None),
+            seed=payload.seed if payload.seed is not None else (selected_client.seed if selected_client else None),
+            kimodo_worker_index=payload.kimodo_worker_index,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -113,6 +129,11 @@ async def index() -> str:
     return (BASE_DIR / "templates" / "index.html").read_text()
 
 
+@app.get("/multi", response_class=HTMLResponse)
+async def multi_grid() -> str:
+    return (BASE_DIR / "templates" / "multi.html").read_text()
+
+
 @app.get("/api/config")
 async def get_config() -> dict[str, Any]:
     return {
@@ -122,7 +143,9 @@ async def get_config() -> dict[str, Any]:
         "g1_available": g1_runtime.available,
         "g1_error": g1_runtime.load_error,
         "g1_asset_root": str(G1_ASSET_ROOT),
-        "kimodo_g1_offline_enabled": kimodo_g1_client is not None,
+        "kimodo_g1_offline_enabled": bool(kimodo_g1_clients),
+        "kimodo_g1_worker_count": len(kimodo_g1_clients),
+        "kimodo_g1_api_urls": [client.base_url for client in kimodo_g1_clients],
         "smplx_available": smplx_runtime.available,
         "smplx_error": smplx_runtime.load_error,
         "smplx_gender": "neutral",
@@ -239,7 +262,7 @@ async def _receive_realtime_events(
 
 def _uses_kimodo_g1_offline(session: MotionSession) -> bool:
     return (
-        kimodo_g1_client is not None
+        _kimodo_client_for_session(session) is not None
         and session.renderer_name == "g1"
         and session.input_mode == "offline"
     )
@@ -251,7 +274,8 @@ async def _stream_kimodo_g1_offline(
     send_json: Callable[[dict[str, Any]], Awaitable[None]],
     send_bytes: Callable[[bytes], Awaitable[None]],
 ) -> None:
-    assert kimodo_g1_client is not None
+    kimodo_client = _kimodo_client_for_session(session)
+    assert kimodo_client is not None
     if len(session.schedule) > 1:
         await _stream_kimodo_g1_offline_sequence(session, renderer, send_json, send_bytes)
         return
@@ -268,7 +292,7 @@ async def _stream_kimodo_g1_offline(
     )
 
     try:
-        motion = await asyncio.to_thread(kimodo_g1_client.generate_offline, session.schedule, session.seed)
+        motion = await asyncio.to_thread(kimodo_client.generate_offline, session.schedule, session.seed)
     except KimodoG1Error as exc:
         session.running = False
         await send_json(
@@ -397,7 +421,8 @@ async def _stream_kimodo_g1_offline_sequence(
     send_json: Callable[[dict[str, Any]], Awaitable[None]],
     send_bytes: Callable[[bytes], Awaitable[None]],
 ) -> None:
-    assert kimodo_g1_client is not None
+    kimodo_client = _kimodo_client_for_session(session)
+    assert kimodo_client is not None
     started_at = time.time()
     await send_json(
         {
@@ -414,7 +439,7 @@ async def _stream_kimodo_g1_offline_sequence(
 
     def produce_frames() -> None:
         try:
-            for item in kimodo_g1_client.generate_offline_sequence_frames(session.schedule, seed=session.seed):
+            for item in kimodo_client.generate_offline_sequence_frames(session.schedule, seed=session.seed):
                 loop.call_soon_threadsafe(queue.put_nowait, item)
         except Exception as exc:  # noqa: BLE001 - surfaced to websocket client.
             loop.call_soon_threadsafe(queue.put_nowait, exc)

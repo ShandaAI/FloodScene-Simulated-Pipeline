@@ -119,6 +119,23 @@ class KimodoG1Client:
             timeout_seconds=float(os.getenv("KIMODO_G1_REQUEST_TIMEOUT", "600")),
         )
 
+    @classmethod
+    def from_env_pool(cls) -> list["KimodoG1Client"]:
+        urls_raw = os.getenv("KIMODO_G1_API_URLS", "").strip()
+        if not urls_raw:
+            client = cls.from_env()
+            return [] if client is None else [client]
+
+        seed_raw = os.getenv("KIMODO_G1_SEED", "11").strip()
+        seed = None if seed_raw.lower() in {"", "none", "null"} else int(seed_raw)
+        diffusion_steps = int(os.getenv("KIMODO_G1_DIFFUSION_STEPS", "20"))
+        timeout_seconds = float(os.getenv("KIMODO_G1_REQUEST_TIMEOUT", "600"))
+        return [
+            cls(url.strip(), diffusion_steps=diffusion_steps, seed=seed, timeout_seconds=timeout_seconds)
+            for url in urls_raw.split(",")
+            if url.strip()
+        ]
+
     def generate_offline(self, schedule: Iterable[Any], seed: int | None = None) -> GeneratedG1Motion:
         payload: dict[str, Any] = {
             "schedule": [self._cue_payload(cue) for cue in schedule],

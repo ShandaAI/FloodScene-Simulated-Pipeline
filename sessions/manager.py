@@ -25,6 +25,7 @@ class MotionSessionManager:
         schedule: list[object],
         frame_rate: int,
         seed: int | None,
+        kimodo_worker_index: int | None,
     ) -> MotionSession:
         renderer = (renderer_name or self.default_renderer).lower()
         if renderer not in self.renderers:
@@ -48,6 +49,7 @@ class MotionSessionManager:
             schedule=normalized_schedule,
             frame_rate=frame_rate,
             seed=seed,
+            kimodo_worker_index=kimodo_worker_index,
         )
         self.sessions[session.session_id] = session
         return session

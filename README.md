@@ -21,6 +21,14 @@ uvicorn app:app --host 127.0.0.1 --port 7861
 
 Open `http://127.0.0.1:7861`.
 
+For eight-way random seed comparison, run the local app with an API pool and open
+`http://127.0.0.1:7861/multi`:
+
+```bash
+KIMODO_G1_API_URLS=http://127.0.0.1:9000,http://127.0.0.1:9001,http://127.0.0.1:9002,http://127.0.0.1:9003,http://127.0.0.1:9004,http://127.0.0.1:9005,http://127.0.0.1:9006,http://127.0.0.1:9007 \
+uvicorn app:app --host 127.0.0.1 --port 7861
+```
+
 ## Asset Sources
 
 Large model and mesh assets are not committed. Put them in the ignored cache
@@ -71,7 +79,8 @@ Online payload:
   "input_mode": "online",
   "initial_text": "walk in a circle.",
   "frame_rate": 20,
-  "seed": 11
+  "seed": 11,
+  "kimodo_worker_index": 0
 }
 ```
 
@@ -83,6 +92,7 @@ Offline payload:
   "input_mode": "offline",
   "frame_rate": 20,
   "seed": 11,
+  "kimodo_worker_index": 0,
   "schedule": [
     { "text": "walk forward", "start": 0 },
     { "text": "turn left", "start": 5 },
