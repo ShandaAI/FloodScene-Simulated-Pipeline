@@ -13,13 +13,14 @@ class MultiGridCell {
         this.seed = 11 + index;
         this.workerIndex = index;
         this.frameCount = 0;
-        this.completed = false;
         this.currentRootPos = new THREE.Vector3(0, 1, 0);
-        this.displayFramePrevious = null;
-        this.displayFrameCurrent = null;
-        this.displayFrameStartedAt = 0;
         this.sourceFrameIntervalMs = 1000 / 30;
-        this.ready = false;
+        this.topologyReady = false;
+        this.frameBuffer = [];
+        this.bufferReady = false;
+        this.playing = false;
+        this.playbackComplete = false;
+        this.playbackStartedAt = 0;
 
         this.initScene();
         this.resize();
@@ -70,11 +71,11 @@ class MultiGridCell {
     }
 
     async load() {
-        if (this.ready) return;
+        if (this.topologyReady) return;
         this.setStatus('Loading');
         await this.avatar.loadTopology();
         this.avatar.setVisible(false);
-        this.ready = true;
+        this.topologyReady = true;
         this.setStatus('Idle');
     }
 
@@ -90,7 +91,6 @@ class MultiGridCell {
         this.seed = seed;
         this.workerIndex = workerIndex;
         this.seedEl.textContent = `Seed ${seed}`;
-        this.completed = false;
         this.setStatus('Creating');
 
         const response = await fetch('/api/realtime/sessions', {
@@ -102,6 +102,8 @@ class MultiGridCell {
                 frame_rate: 30,
                 seed,
                 kimodo_worker_index: workerIndex,
+                stream_realtime: false,
+                charge_budget: false,
                 schedule: [{ text: prompt, start: 0, end: duration }],
             }),
         });
@@ -136,7 +138,7 @@ class MultiGridCell {
         socket.onclose = () => {
             if (this.socket !== socket) return;
             this.socket = null;
-            if (!this.completed) this.setStatus('Closed');
+            if (!this.bufferReady) this.markReady('Closed');
         };
     }
 
@@ -144,34 +146,24 @@ class MultiGridCell {
         if (event.type === 'motion_generation.started') {
             this.setStatus('Generating');
         } else if (event.type === 'motion_generation.segment_completed') {
-            this.setStatus('Streaming');
+            this.setStatus('Receiving');
         } else if (event.type === 'offline_schedule.completed') {
-            if (this.completed) return;
-            this.completed = true;
-            this.setStatus('Complete');
-            this.closeSocket(false);
-            this.app.onCellComplete();
+            this.markReady('Ready');
         } else if (event.type === 'budget_exhausted') {
-            if (this.completed) return;
-            this.completed = true;
-            this.setStatus('Budget');
-            this.app.onCellComplete();
+            this.markReady('Budget');
         } else if (event.type === 'error') {
-            if (this.completed) return;
-            this.completed = true;
-            this.setStatus(event.code || 'Error');
-            this.app.onCellComplete();
+            this.markReady(event.code || 'Error');
         }
     }
 
     applyBinaryMotionFrame(packet) {
-        if (!this.avatar) return;
+        if (!this.avatar || this.bufferReady) return;
         const frame = this.avatar.readFrame(packet, 9);
         if (!frame) return;
-        this.enqueueDisplayFrame(frame);
-        this.frameCount = frame.frameId;
-        this.framesEl.textContent = `${frame.frameId} frames`;
-        this.setStatus('Streaming');
+        this.frameBuffer.push(this.copyFrame(frame));
+        this.frameCount = this.frameBuffer.length;
+        this.framesEl.textContent = `${this.frameCount} frames`;
+        this.setStatus('Receiving');
     }
 
     copyFrame(frame) {
@@ -185,23 +177,35 @@ class MultiGridCell {
         };
     }
 
-    enqueueDisplayFrame(frame) {
-        const copied = this.copyFrame(frame);
-        if (!this.displayFrameCurrent) {
-            this.displayFramePrevious = copied;
-            this.displayFrameCurrent = copied;
-            this.displayFrameStartedAt = performance.now();
-            this.avatar.applyFrame(copied, 1);
-            this.currentRootPos.set(copied.root[0], copied.root[1], copied.root[2]);
+    markReady(status) {
+        if (this.bufferReady) return;
+        this.bufferReady = true;
+        this.playing = false;
+        this.closeSocket(false);
+        this.sessionId = null;
+        this.setStatus(status);
+        this.app.onCellReady();
+    }
+
+    startPlayback(startedAt) {
+        this.playbackStartedAt = startedAt;
+        this.playbackComplete = false;
+        this.playing = this.frameBuffer.length > 0;
+
+        if (!this.playing) {
+            this.playbackComplete = true;
+            this.setStatus('Empty');
+            this.app.onCellPlaybackComplete();
             return;
         }
-        this.displayFramePrevious = this.displayFrameCurrent;
-        this.displayFrameCurrent = copied;
-        this.displayFrameStartedAt = performance.now();
+
+        this.avatar.setVisible(true);
+        this.setStatus('Playing');
+        this.applyPlaybackFrame(startedAt);
     }
 
     render(now) {
-        this.applyInterpolatedDisplayFrame(now);
+        this.applyPlaybackFrame(now);
         const target = new THREE.Vector3(this.currentRootPos.x, 0.85, this.currentRootPos.z);
         this.controls.target.lerp(target, 0.04);
         this.keyLight.position.set(this.currentRootPos.x + 4.5, 7, this.currentRootPos.z + 3.5);
@@ -211,26 +215,48 @@ class MultiGridCell {
         this.renderer.render(this.scene, this.camera);
     }
 
-    applyInterpolatedDisplayFrame(now) {
-        if (!this.avatar || !this.displayFrameCurrent) return;
-        if (!this.displayFramePrevious) {
-            this.avatar.applyFrame(this.displayFrameCurrent, 1);
+    applyPlaybackFrame(now) {
+        if (!this.playing || !this.avatar || this.frameBuffer.length === 0) return;
+
+        const position = Math.max(0, (now - this.playbackStartedAt) / this.sourceFrameIntervalMs);
+        const lastIndex = this.frameBuffer.length - 1;
+        if (position >= this.frameBuffer.length) {
+            this.applyFrameAt(lastIndex);
+            this.playing = false;
+            this.playbackComplete = true;
+            this.setStatus('Complete');
+            this.app.onCellPlaybackComplete();
+            return;
+        }
+        if (position >= lastIndex) {
+            this.applyFrameAt(lastIndex);
             return;
         }
 
-        const alpha = Math.max(0, Math.min(1, (now - this.displayFrameStartedAt) / this.sourceFrameIntervalMs));
-        const prev = this.displayFramePrevious;
-        const curr = this.displayFrameCurrent;
-        const joints = new Float32Array(curr.joints.length);
+        const previousIndex = Math.floor(position);
+        const nextIndex = previousIndex + 1;
+        const alpha = position - previousIndex;
+        this.applyInterpolatedFrame(this.frameBuffer[previousIndex], this.frameBuffer[nextIndex], alpha);
+    }
+
+    applyFrameAt(index) {
+        const frame = this.frameBuffer[index];
+        this.avatar.applyFrame(frame, 1);
+        this.currentRootPos.set(frame.root[0], frame.root[1], frame.root[2]);
+    }
+
+    applyInterpolatedFrame(previous, current, alpha) {
+        const clampedAlpha = Math.max(0, Math.min(1, alpha));
+        const joints = new Float32Array(current.joints.length);
         for (let i = 0; i < joints.length; i++) {
-            joints[i] = prev.joints[i] * (1 - alpha) + curr.joints[i] * alpha;
+            joints[i] = previous.joints[i] * (1 - clampedAlpha) + current.joints[i] * clampedAlpha;
         }
         const root = [
-            prev.root[0] * (1 - alpha) + curr.root[0] * alpha,
-            prev.root[1] * (1 - alpha) + curr.root[1] * alpha,
-            prev.root[2] * (1 - alpha) + curr.root[2] * alpha,
+            previous.root[0] * (1 - clampedAlpha) + current.root[0] * clampedAlpha,
+            previous.root[1] * (1 - clampedAlpha) + current.root[1] * clampedAlpha,
+            previous.root[2] * (1 - clampedAlpha) + current.root[2] * clampedAlpha,
         ];
-        this.avatar.applyFrame({ ...curr, root, joints }, 1);
+        this.avatar.applyFrame({ ...current, root, joints }, 1);
         this.currentRootPos.set(root[0], root[1], root[2]);
     }
 
@@ -238,11 +264,13 @@ class MultiGridCell {
         const sessionId = this.sessionId;
         this.closeSocket(true);
         this.sessionId = null;
-        this.completed = false;
         this.frameCount = 0;
+        this.frameBuffer = [];
+        this.bufferReady = false;
+        this.playing = false;
+        this.playbackComplete = false;
+        this.playbackStartedAt = 0;
         this.framesEl.textContent = '0 frames';
-        this.displayFramePrevious = null;
-        this.displayFrameCurrent = null;
         this.currentRootPos.set(0, 1, 0);
         if (this.avatar) {
             this.avatar.clearTrail();
@@ -251,7 +279,7 @@ class MultiGridCell {
         if (callApi && sessionId) {
             await fetch(`/api/realtime/sessions/${sessionId}/close`, { method: 'POST' }).catch(() => {});
         }
-        this.setStatus(this.ready ? 'Idle' : 'Loading');
+        this.setStatus(this.topologyReady ? 'Idle' : 'Loading');
     }
 
     closeSocket(sendClose) {
@@ -284,7 +312,10 @@ class MultiGridApp {
         this.cells = [];
         this.config = null;
         this.running = false;
-        this.completedCells = 0;
+        this.readyCells = 0;
+        this.playbackCompleteCells = 0;
+        this.playbackStarted = false;
+        this.playbackTimer = null;
         this.timerStartedAt = null;
         this.timerStoppedAt = null;
 
@@ -353,8 +384,11 @@ class MultiGridApp {
         }
 
         this.running = true;
-        this.completedCells = 0;
-        this.updateCompleteDisplay();
+        this.readyCells = 0;
+        this.playbackCompleteCells = 0;
+        this.playbackStarted = false;
+        this.clearPlaybackTimer();
+        this.updateReadyDisplay();
         this.setStatus('Starting');
         this.startResetBtn.textContent = 'Reset';
         this.startResetBtn.disabled = true;
@@ -377,21 +411,22 @@ class MultiGridApp {
         results.forEach((result, index) => {
             if (result.status !== 'rejected') return;
             const cell = this.cells[index];
-            cell.completed = true;
-            cell.setStatus(result.reason?.message || 'Error');
-            this.onCellComplete();
+            cell.markReady(result.reason?.message || 'Error');
         });
         this.startResetBtn.disabled = false;
-        if (this.running) this.setStatus('Streaming');
+        if (this.running && !this.playbackStarted) this.setStatus('Generating');
     }
 
     async reset() {
         this.running = false;
-        this.completedCells = 0;
+        this.readyCells = 0;
+        this.playbackCompleteCells = 0;
+        this.playbackStarted = false;
+        this.clearPlaybackTimer();
         this.stopTimer();
         await Promise.all(this.cells.map(cell => cell.reset()));
         this.clearTimer();
-        this.updateCompleteDisplay();
+        this.updateReadyDisplay();
         this.setStatus('Idle');
         this.startResetBtn.textContent = 'Start';
         this.startResetBtn.disabled = false;
@@ -400,11 +435,33 @@ class MultiGridApp {
         this.baseSeedEl.disabled = false;
     }
 
-    onCellComplete() {
+    onCellReady() {
         if (!this.running) return;
-        this.completedCells = Math.min(this.cellCount, this.completedCells + 1);
-        this.updateCompleteDisplay();
-        if (this.completedCells >= this.cellCount) {
+        this.readyCells = Math.min(this.cellCount, this.readyCells + 1);
+        this.updateReadyDisplay();
+        if (this.readyCells >= this.cellCount) {
+            this.startSynchronizedPlayback();
+        }
+    }
+
+    startSynchronizedPlayback() {
+        if (!this.running || this.playbackStarted) return;
+        this.playbackStarted = true;
+        this.playbackCompleteCells = 0;
+        this.setStatus('Ready');
+        this.playbackTimer = window.setTimeout(() => {
+            this.playbackTimer = null;
+            if (!this.running) return;
+            this.setStatus('Playing');
+            const startedAt = performance.now() + 80;
+            this.cells.forEach(cell => cell.startPlayback(startedAt));
+        }, 350);
+    }
+
+    onCellPlaybackComplete() {
+        if (!this.running) return;
+        this.playbackCompleteCells = Math.min(this.cellCount, this.playbackCompleteCells + 1);
+        if (this.playbackCompleteCells >= this.cellCount) {
             this.running = false;
             this.stopTimer();
             this.setStatus('Complete');
@@ -428,6 +485,13 @@ class MultiGridApp {
         }
     }
 
+    clearPlaybackTimer() {
+        if (this.playbackTimer !== null) {
+            window.clearTimeout(this.playbackTimer);
+            this.playbackTimer = null;
+        }
+    }
+
     clearTimer() {
         this.timerStartedAt = null;
         this.timerStoppedAt = null;
@@ -443,8 +507,8 @@ class MultiGridApp {
         this.elapsedEl.textContent = `${Math.max(0, (end - this.timerStartedAt) / 1000).toFixed(2)}s`;
     }
 
-    updateCompleteDisplay() {
-        this.completeEl.textContent = `${this.completedCells} / ${this.cellCount}`;
+    updateReadyDisplay() {
+        this.completeEl.textContent = `${this.readyCells} / ${this.cellCount}`;
     }
 
     setStatus(status) {

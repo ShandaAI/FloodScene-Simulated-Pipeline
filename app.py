@@ -92,12 +92,14 @@ def _session_payload(session: MotionSession) -> dict[str, Any]:
         "frame_rate": session.frame_rate,
         "seed": session.seed,
         "kimodo_worker_index": session.kimodo_worker_index,
+        "stream_realtime": session.stream_realtime,
+        "charge_budget": session.charge_budget,
         "websocket_url": f"/api/realtime/sessions/{session.session_id}",
     }
 
 
 def _create_session(payload: CreateRealtimeSessionRequest) -> MotionSession:
-    if _budget_remaining() <= 0:
+    if payload.charge_budget and _budget_remaining() <= 0:
         raise HTTPException(status_code=429, detail="Public demo budget exhausted for this Space.")
 
     selected_client = _kimodo_client_for_index(payload.kimodo_worker_index)
@@ -110,6 +112,8 @@ def _create_session(payload: CreateRealtimeSessionRequest) -> MotionSession:
             frame_rate=payload.frame_rate,
             seed=payload.seed if payload.seed is not None else (selected_client.seed if selected_client else None),
             kimodo_worker_index=payload.kimodo_worker_index,
+            stream_realtime=payload.stream_realtime,
+            charge_budget=payload.charge_budget,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -348,7 +352,7 @@ async def _stream_kimodo_g1_offline(
         if not session.running:
             stream_completed = False
             break
-        if _budget_remaining() <= 0:
+        if session.charge_budget and _budget_remaining() <= 0:
             await send_json({"type": "budget_exhausted", "detail": "Public demo budget exhausted for this Space."})
             session.running = False
             stream_completed = False
@@ -382,9 +386,10 @@ async def _stream_kimodo_g1_offline(
         )
         streamed_frames += 1
         streamed_seconds += frame_interval
-        async with budget_lock:
-            budget_used_seconds += frame_interval
-        if frame_index < motion.num_frames - 1:
+        if session.charge_budget:
+            async with budget_lock:
+                budget_used_seconds += frame_interval
+        if session.stream_realtime and frame_index < motion.num_frames - 1:
             await asyncio.sleep(frame_interval)
 
     if stream_completed:
@@ -501,7 +506,7 @@ async def _stream_kimodo_g1_offline_sequence(
             await asyncio.sleep(0.05)
         if not session.running:
             return False
-        if _budget_remaining() <= 0:
+        if session.charge_budget and _budget_remaining() <= 0:
             await send_json({"type": "budget_exhausted", "detail": "Public demo budget exhausted for this Space."})
             session.running = False
             return False
@@ -523,9 +528,11 @@ async def _stream_kimodo_g1_offline_sequence(
         frame_interval = 1.0 / frame.fps
         streamed_frames += 1
         streamed_seconds += frame_interval
-        async with budget_lock:
-            budget_used_seconds += frame_interval
-        await asyncio.sleep(frame_interval)
+        if session.charge_budget:
+            async with budget_lock:
+                budget_used_seconds += frame_interval
+        if session.stream_realtime:
+            await asyncio.sleep(frame_interval)
         return True
 
     while session.running:
@@ -643,7 +650,7 @@ async def realtime_session_stream(websocket: WebSocket, session_id: str) -> None
                 await asyncio.sleep(0.05)
                 continue
 
-            if _budget_remaining() <= 0:
+            if session.charge_budget and _budget_remaining() <= 0:
                 await send_json({"type": "budget_exhausted", "detail": "Public demo budget exhausted for this Space."})
                 break
 
@@ -685,8 +692,9 @@ async def realtime_session_stream(websocket: WebSocket, session_id: str) -> None
                     buffer_capacity=4,
                 )
             )
-            async with budget_lock:
-                budget_used_seconds += frame_interval
+            if session.charge_budget:
+                async with budget_lock:
+                    budget_used_seconds += frame_interval
             await asyncio.sleep(frame_interval)
     except WebSocketDisconnect:
         return

@@ -24,6 +24,8 @@ class CreateRealtimeSessionRequest(BaseModel):
     frame_rate: int = Field(default=20, ge=1, le=60)
     seed: int | None = Field(default=None, ge=0, le=2_147_483_647)
     kimodo_worker_index: int | None = Field(default=None, ge=0, le=31)
+    stream_realtime: bool = True
+    charge_budget: bool = True
 
 
 class InputTextRequest(BaseModel):

@@ -26,6 +26,8 @@ class MotionSessionManager:
         frame_rate: int,
         seed: int | None,
         kimodo_worker_index: int | None,
+        stream_realtime: bool,
+        charge_budget: bool,
     ) -> MotionSession:
         renderer = (renderer_name or self.default_renderer).lower()
         if renderer not in self.renderers:
@@ -50,6 +52,8 @@ class MotionSessionManager:
             frame_rate=frame_rate,
             seed=seed,
             kimodo_worker_index=kimodo_worker_index,
+            stream_realtime=stream_realtime,
+            charge_budget=charge_budget,
         )
         self.sessions[session.session_id] = session
         return session
