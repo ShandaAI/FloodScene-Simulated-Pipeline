@@ -15,6 +15,7 @@ class MotionApp {
         this.bufferCapacity = 4;
         this.historyLength = 4;
         this.smoothingAlpha = 1.0;
+        this.generationSeed = 11;
         this.lastUserInteraction = 0;
         this.autoFollowDelay = 2000;
         this.currentRootPos = new THREE.Vector3(0, 1, 0);
@@ -60,6 +61,7 @@ class MotionApp {
         this.scheduleConfigFields = document.getElementById('scheduleConfigFields');
         this.cfgConfigFields = document.getElementById('cfgConfigFields');
         this.modalHistoryLength = document.getElementById('modalHistoryLength');
+        this.modalSeed = document.getElementById('modalSeed');
         this.modalSmoothingAlpha = document.getElementById('modalSmoothingAlpha');
         this.modalSmoothingValue = document.getElementById('modalSmoothingValue');
         this.configDiscardBtn = document.getElementById('configDiscardBtn');
@@ -277,6 +279,9 @@ class MotionApp {
             const config = await response.json();
             this.config = config;
             this.targetFps = config.frame_rate || 20;
+            if (Number.isInteger(config.kimodo_g1_default_seed)) {
+                this.generationSeed = config.kimodo_g1_default_seed;
+            }
             await this.initAvatar(config);
             this.syncConfigLabels();
             return config;
@@ -323,6 +328,7 @@ class MotionApp {
                 renderer: this.config?.renderer || 'g1',
                 input_mode: this.inputMode,
                 frame_rate: this.targetFps,
+                seed: this.generationSeed,
             };
             if (this.inputMode === 'online') {
                 sessionPayload.initial_text = this.motionText.value;
@@ -585,6 +591,7 @@ class MotionApp {
 
     openConfig() {
         this.modalHistoryLength.value = String(this.historyLength);
+        this.modalSeed.value = String(this.generationSeed);
         this.modalSmoothingAlpha.value = String(this.smoothingAlpha);
         this.modalSmoothingValue.textContent = this.smoothingAlpha.toFixed(2);
         this.configModal.hidden = false;
@@ -596,9 +603,11 @@ class MotionApp {
 
     async saveConfig() {
         const nextHistory = Math.max(1, Math.min(16, Number(this.modalHistoryLength.value) || 4));
+        const nextSeed = Math.max(0, Math.min(2147483647, Math.floor(Number(this.modalSeed.value) || 0)));
         const nextSmoothing = Math.max(0, Math.min(1, Number(this.modalSmoothingAlpha.value)));
         const shouldRestart = this.isRunning;
         this.historyLength = nextHistory;
+        this.generationSeed = nextSeed;
         this.smoothingAlpha = nextSmoothing;
         this.syncConfigLabels();
         this.closeConfig();

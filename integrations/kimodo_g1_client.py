@@ -119,20 +119,21 @@ class KimodoG1Client:
             timeout_seconds=float(os.getenv("KIMODO_G1_REQUEST_TIMEOUT", "600")),
         )
 
-    def generate_offline(self, schedule: Iterable[Any]) -> GeneratedG1Motion:
+    def generate_offline(self, schedule: Iterable[Any], seed: int | None = None) -> GeneratedG1Motion:
         payload: dict[str, Any] = {
             "schedule": [self._cue_payload(cue) for cue in schedule],
             "diffusion_steps": self.diffusion_steps,
         }
-        if self.seed is not None:
-            payload["seed"] = self.seed
+        resolved_seed = self._resolve_seed(seed)
+        if resolved_seed is not None:
+            payload["seed"] = resolved_seed
 
         started_at = time.perf_counter()
         data = self._post_json("/v1/g1/generate", payload)
         wall_seconds = time.perf_counter() - started_at
         return self._decode_motion(data, wall_seconds)
 
-    def generate_offline_sequence(self, schedule: Iterable[Any]) -> Iterable[GeneratedG1Chunk]:
+    def generate_offline_sequence(self, schedule: Iterable[Any], seed: int | None = None) -> Iterable[GeneratedG1Chunk]:
         cues = list(schedule)
         segments = []
         for cue in cues:
@@ -146,7 +147,7 @@ class KimodoG1Client:
             segments.append({"text": str(getattr(cue, "text")), "duration": duration})
 
         if len(segments) == 1:
-            motion = self.generate_offline(cues)
+            motion = self.generate_offline(cues, seed=seed)
             yield GeneratedG1Chunk(
                 segment_index=0,
                 text=segments[0]["text"],
@@ -167,23 +168,32 @@ class KimodoG1Client:
             "segments": segments,
             "diffusion_steps": self.diffusion_steps,
         }
-        if self.seed is not None:
-            payload["seed"] = self.seed
+        resolved_seed = self._resolve_seed(seed)
+        if resolved_seed is not None:
+            payload["seed"] = resolved_seed
 
         started_at = time.perf_counter()
         yield from self._post_ndjson("/v1/g1/generate_sequence", payload, started_at)
 
-    def generate_offline_sequence_frames(self, schedule: Iterable[Any]) -> Iterable[GeneratedG1Segment | GeneratedG1Frame]:
+    def generate_offline_sequence_frames(
+        self,
+        schedule: Iterable[Any],
+        seed: int | None = None,
+    ) -> Iterable[GeneratedG1Segment | GeneratedG1Frame]:
         segments = self._sequence_segments(schedule)
         payload: dict[str, Any] = {
             "segments": segments,
             "diffusion_steps": self.diffusion_steps,
         }
-        if self.seed is not None:
-            payload["seed"] = self.seed
+        resolved_seed = self._resolve_seed(seed)
+        if resolved_seed is not None:
+            payload["seed"] = resolved_seed
 
         started_at = time.perf_counter()
         yield from self._post_frame_ndjson("/v1/g1/generate_sequence_frames", payload, started_at)
+
+    def _resolve_seed(self, seed: int | None) -> int | None:
+        return self.seed if seed is None else seed
 
     def _post_json(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         request = urllib.request.Request(

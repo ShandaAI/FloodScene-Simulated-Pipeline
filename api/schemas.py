@@ -22,8 +22,8 @@ class CreateRealtimeSessionRequest(BaseModel):
     initial_text: str = Field(default="walk in a circle.")
     schedule: list[TextCueRequest] = Field(default_factory=list)
     frame_rate: int = Field(default=20, ge=1, le=60)
+    seed: int | None = Field(default=None, ge=0, le=2_147_483_647)
 
 
 class InputTextRequest(BaseModel):
     text: str = Field(min_length=1)
-

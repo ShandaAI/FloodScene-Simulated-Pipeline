@@ -77,6 +77,7 @@ def _session_payload(session: MotionSession) -> dict[str, Any]:
             for cue in session.schedule
         ],
         "frame_rate": session.frame_rate,
+        "seed": session.seed,
         "websocket_url": f"/api/realtime/sessions/{session.session_id}",
     }
 
@@ -92,6 +93,7 @@ def _create_session(payload: CreateRealtimeSessionRequest) -> MotionSession:
             initial_text=payload.initial_text,
             schedule=payload.schedule,
             frame_rate=payload.frame_rate,
+            seed=payload.seed if payload.seed is not None else (kimodo_g1_client.seed if kimodo_g1_client else None),
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -126,6 +128,7 @@ async def get_config() -> dict[str, Any]:
         "smplx_gender": "neutral",
         "smplx_beta_mode": "all_zero",
         "frame_rate": FRAME_RATE,
+        "kimodo_g1_default_seed": kimodo_g1_client.seed if kimodo_g1_client else None,
         "public_budget_seconds": PUBLIC_DAILY_BUDGET_SECONDS,
         "budget_used_seconds": round(budget_used_seconds, 2),
         "budget_remaining_seconds": round(_budget_remaining(), 2),
@@ -265,7 +268,7 @@ async def _stream_kimodo_g1_offline(
     )
 
     try:
-        motion = await asyncio.to_thread(kimodo_g1_client.generate_offline, session.schedule)
+        motion = await asyncio.to_thread(kimodo_g1_client.generate_offline, session.schedule, session.seed)
     except KimodoG1Error as exc:
         session.running = False
         await send_json(
@@ -411,7 +414,7 @@ async def _stream_kimodo_g1_offline_sequence(
 
     def produce_frames() -> None:
         try:
-            for item in kimodo_g1_client.generate_offline_sequence_frames(session.schedule):
+            for item in kimodo_g1_client.generate_offline_sequence_frames(session.schedule, seed=session.seed):
                 loop.call_soon_threadsafe(queue.put_nowait, item)
         except Exception as exc:  # noqa: BLE001 - surfaced to websocket client.
             loop.call_soon_threadsafe(queue.put_nowait, exc)

@@ -70,7 +70,8 @@ Online payload:
   "renderer": "g1",
   "input_mode": "online",
   "initial_text": "walk in a circle.",
-  "frame_rate": 20
+  "frame_rate": 20,
+  "seed": 11
 }
 ```
 
@@ -81,6 +82,7 @@ Offline payload:
   "renderer": "g1",
   "input_mode": "offline",
   "frame_rate": 20,
+  "seed": 11,
   "schedule": [
     { "text": "walk forward", "start": 0 },
     { "text": "turn left", "start": 5 },

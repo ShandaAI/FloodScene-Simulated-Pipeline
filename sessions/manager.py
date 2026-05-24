@@ -24,6 +24,7 @@ class MotionSessionManager:
         initial_text: str,
         schedule: list[object],
         frame_rate: int,
+        seed: int | None,
     ) -> MotionSession:
         renderer = (renderer_name or self.default_renderer).lower()
         if renderer not in self.renderers:
@@ -46,6 +47,7 @@ class MotionSessionManager:
             current_text=current_text,
             schedule=normalized_schedule,
             frame_rate=frame_rate,
+            seed=seed,
         )
         self.sessions[session.session_id] = session
         return session
