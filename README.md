@@ -57,6 +57,8 @@ renderers/
 
 ## Local API
 
+Full API details are in `doc/api.md`.
+
 ```text
 GET /api/config
 GET /api/g1/topology
