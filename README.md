@@ -57,7 +57,7 @@ renderers/
 
 ## Local API
 
-Full API details are in `doc/api.md`.
+Full API details are in `docs/api.md`.
 
 ```text
 GET /api/config
