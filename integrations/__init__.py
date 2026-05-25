@@ -1,2 +1,0 @@
-"""External motion generation integrations."""
-

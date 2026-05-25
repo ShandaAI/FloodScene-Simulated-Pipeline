@@ -4,7 +4,6 @@ class MotionApp {
         this.realtimeSocket = null;
 
         this.isRunning = false;
-        this.isPaused = false;
         this.inputMode = 'online';
         this.targetFps = 20;
         this.frameCount = 0;
@@ -12,9 +11,10 @@ class MotionApp {
         this.motionFpsUpdatedAt = performance.now();
         this.timerStartedAt = null;
         this.timerStoppedAt = null;
+        this.latencyRecorded = false;
+        this.latencySeconds = null;
         this.bufferCapacity = 4;
-        this.historyLength = 4;
-        this.smoothingAlpha = 1.0;
+        this.smooth = 0.0;
         this.generationSeed = 11;
         this.lastUserInteraction = 0;
         this.autoFollowDelay = 2000;
@@ -40,12 +40,9 @@ class MotionApp {
 
     bindElements() {
         this.statusEl = document.getElementById('status');
-        this.bufferSizeEl = document.getElementById('bufferSize');
         this.fpsEl = document.getElementById('fps');
         this.frameCountEl = document.getElementById('frameCount');
-        this.elapsedTimeEl = document.getElementById('elapsedTime');
-        this.currentSmoothingEl = document.getElementById('currentSmoothing');
-        this.currentHistoryEl = document.getElementById('currentHistory');
+        this.latencyEl = document.getElementById('latency');
         this.motionText = document.getElementById('motionText');
         this.onlineModeBtn = document.getElementById('onlineModeBtn');
         this.offlineModeBtn = document.getElementById('offlineModeBtn');
@@ -54,16 +51,11 @@ class MotionApp {
         this.offlineScheduleRows = document.getElementById('offlineScheduleRows');
         this.addCueBtn = document.getElementById('addCueBtn');
         this.startResetBtn = document.getElementById('startResetBtn');
-        this.updateBtn = document.getElementById('updateBtn');
-        this.pauseResumeBtn = document.getElementById('pauseResumeBtn');
         this.configBtn = document.getElementById('configBtn');
         this.configModal = document.getElementById('configModal');
-        this.scheduleConfigFields = document.getElementById('scheduleConfigFields');
-        this.cfgConfigFields = document.getElementById('cfgConfigFields');
-        this.modalHistoryLength = document.getElementById('modalHistoryLength');
         this.modalSeed = document.getElementById('modalSeed');
-        this.modalSmoothingAlpha = document.getElementById('modalSmoothingAlpha');
-        this.modalSmoothingValue = document.getElementById('modalSmoothingValue');
+        this.modalSmooth = document.getElementById('modalSmooth');
+        this.modalSmoothValue = document.getElementById('modalSmoothValue');
         this.configDiscardBtn = document.getElementById('configDiscardBtn');
         this.configSaveBtn = document.getElementById('configSaveBtn');
     }
@@ -149,8 +141,6 @@ class MotionApp {
                 this.start();
             }
         });
-        this.updateBtn.addEventListener('click', () => this.updateText());
-        this.pauseResumeBtn.addEventListener('click', () => this.togglePause());
         this.configBtn.addEventListener('click', () => this.openConfig());
         this.onlineModeBtn.addEventListener('click', () => this.setInputMode('online'));
         this.offlineModeBtn.addEventListener('click', () => this.setInputMode('offline'));
@@ -158,41 +148,20 @@ class MotionApp {
         this.motionText.addEventListener('keydown', event => {
             if (event.key === 'Enter' && this.inputMode === 'online') {
                 event.preventDefault();
-                if (this.isRunning) this.updateText();
+                if (!this.isRunning) this.start();
             }
         });
         this.configDiscardBtn.addEventListener('click', () => this.closeConfig());
         this.configSaveBtn.addEventListener('click', () => this.saveConfig());
-        this.modalSmoothingAlpha.addEventListener('input', () => {
-            this.modalSmoothingValue.textContent = Number(this.modalSmoothingAlpha.value).toFixed(2);
+        this.modalSmooth.addEventListener('input', () => {
+            this.modalSmoothValue.textContent = Number(this.modalSmooth.value).toFixed(2);
         });
         this.configModal.addEventListener('click', event => {
             if (event.target === this.configModal) this.closeConfig();
         });
         window.addEventListener('beforeunload', () => this.sendResetBeacon());
-        this.renderStaticConfigFields();
         this.renderOfflineSchedule();
         this.setInputMode('online');
-        this.syncConfigLabels();
-    }
-
-    renderStaticConfigFields() {
-        this.scheduleConfigFields.innerHTML = `
-            <div class="config-field">
-                <label for="modalTargetFps">Target FPS</label>
-                <input id="modalTargetFps" type="number" value="20" disabled>
-            </div>
-            <div class="config-field">
-                <label for="modalBufferCapacity">Buffer Capacity</label>
-                <input id="modalBufferCapacity" type="number" value="4" disabled>
-            </div>
-        `;
-        this.cfgConfigFields.innerHTML = `
-            <div class="config-field">
-                <label for="modalGuidanceScale">Guidance Scale</label>
-                <input id="modalGuidanceScale" type="text" value="simulated endpoint" disabled>
-            </div>
-        `;
     }
 
     setInputMode(mode) {
@@ -203,8 +172,6 @@ class MotionApp {
         this.offlineModeBtn.classList.toggle('active', !isOnline);
         this.onlineInputPanel.hidden = !isOnline;
         this.offlineInputPanel.hidden = isOnline;
-        this.updateBtn.textContent = isOnline ? 'Send Text' : 'Schedule Locked';
-        this.updateBtn.disabled = !this.isRunning || !isOnline;
     }
 
     renderOfflineSchedule() {
@@ -283,7 +250,6 @@ class MotionApp {
                 this.generationSeed = config.kimodo_g1_default_seed;
             }
             await this.initAvatar(config);
-            this.syncConfigLabels();
             return config;
         } catch (error) {
             this.setStatus('Offline');
@@ -322,39 +288,25 @@ class MotionApp {
             this.avatar.setVisible(false);
             this.updateFrameDisplay(0);
             this.updateBufferDisplay(0, this.bufferCapacity);
+            this.updateLatencyDisplay();
             this.fpsEl.textContent = '0';
 
             const sessionPayload = {
                 renderer: this.config?.renderer || 'g1',
-                input_mode: this.inputMode,
-                frame_rate: this.targetFps,
-                seed: this.generationSeed,
+                config: {
+                    seed: this.generationSeed,
+                    smooth: this.smooth,
+                },
             };
             if (this.inputMode === 'online') {
-                sessionPayload.initial_text = this.motionText.value;
+                sessionPayload.schedule = [{ text: this.motionText.value.trim(), start: 0, end: 4 }];
             } else {
                 sessionPayload.schedule = this.readOfflineSchedule();
             }
 
-            const response = await fetch('/api/realtime/sessions', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(sessionPayload),
-            });
-
-            if (!response.ok) {
-                const error = await response.json();
-                this.stopTimer();
-                this.setStatus(error.detail || 'Error');
-                this.setControlsLocked(false);
-                return;
-            }
-
-            const data = await response.json();
-            this.sessionId = data.session_id;
+            this.sessionId = 'local-offline';
             this.isRunning = true;
-            this.isPaused = false;
-            this.connectRealtime();
+            this.connectRealtime(sessionPayload);
             this.setButtonState();
         } catch (error) {
             this.stopTimer();
@@ -363,13 +315,14 @@ class MotionApp {
         }
     }
 
-    connectRealtime() {
-        const socket = new WebSocket(this.wsUrl(`/api/realtime/sessions/${this.sessionId}`));
+    connectRealtime(sessionPayload) {
+        const socket = new WebSocket(this.wsUrl('/api/offline'));
         socket.binaryType = 'arraybuffer';
         this.realtimeSocket = socket;
         socket.onopen = () => {
             if (this.realtimeSocket !== socket) return;
-            this.setStatus('Streaming');
+            socket.send(JSON.stringify(sessionPayload));
+            this.setStatus('Generating');
         };
         socket.onmessage = event => {
             if (this.realtimeSocket !== socket) return;
@@ -391,16 +344,9 @@ class MotionApp {
     }
 
     applyRealtimeEvent(data) {
-        if (data.type === 'session.paused') {
-            this.isPaused = true;
-            this.setButtonState();
-            this.setStatus('Paused');
-        } else if (data.type === 'session.resumed' || data.type === 'session.started') {
-            this.isPaused = false;
+        if (data.type === 'session.started') {
             this.setButtonState();
             this.setStatus('Streaming');
-        } else if (data.type === 'input_text.committed') {
-            this.setStatus(this.isPaused ? 'Paused' : 'Streaming');
         } else if (data.type === 'motion_generation.started') {
             this.setStatus('Generating');
         } else if (data.type === 'motion_generation.segment_completed') {
@@ -411,7 +357,6 @@ class MotionApp {
             this.setStatus('Streaming');
         } else if (data.type === 'offline_schedule.completed') {
             this.isRunning = false;
-            this.isPaused = false;
             this.sessionId = null;
             this.stopTimer();
             this.closeSockets();
@@ -440,7 +385,7 @@ class MotionApp {
         this.updateFrameDisplay(frame.frameId);
         this.updateBufferDisplay(frame.bufferSize, frame.bufferCapacity);
         this.updateMotionFps();
-        if (!this.isPaused) this.setStatus('Streaming');
+        this.setStatus('Streaming');
     }
 
     copyFrame(frame) {
@@ -462,6 +407,7 @@ class MotionApp {
             this.displayFrameStartedAt = performance.now();
             this.avatar.applyFrame(copied, 1);
             this.currentRootPos.set(copied.root[0], copied.root[1], copied.root[2]);
+            this.recordLatency();
             return;
         }
         this.displayFramePrevious = this.displayFrameCurrent;
@@ -476,69 +422,42 @@ class MotionApp {
             return;
         }
 
-        const alpha = Math.max(0, Math.min(1, (now - this.displayFrameStartedAt) / this.sourceFrameIntervalMs));
         const prev = this.displayFramePrevious;
         const curr = this.displayFrameCurrent;
+        const alpha = Math.max(0, Math.min(1, (now - this.displayFrameStartedAt) / this.sourceFrameIntervalMs));
+        const smooth = Math.max(0, Math.min(1, this.smooth));
+        if (smooth <= 0) {
+            this.avatar.applyFrame(curr, 1);
+            this.currentRootPos.set(curr.root[0], curr.root[1], curr.root[2]);
+            return;
+        }
         const joints = new Float32Array(curr.joints.length);
         for (let i = 0; i < joints.length; i++) {
-            joints[i] = prev.joints[i] * (1 - alpha) + curr.joints[i] * alpha;
+            const interpolated = prev.joints[i] * (1 - alpha) + curr.joints[i] * alpha;
+            joints[i] = curr.joints[i] * (1 - smooth) + interpolated * smooth;
         }
-        const root = [
+        const interpolatedRoot = [
             prev.root[0] * (1 - alpha) + curr.root[0] * alpha,
             prev.root[1] * (1 - alpha) + curr.root[1] * alpha,
             prev.root[2] * (1 - alpha) + curr.root[2] * alpha,
+        ];
+        const root = [
+            curr.root[0] * (1 - smooth) + interpolatedRoot[0] * smooth,
+            curr.root[1] * (1 - smooth) + interpolatedRoot[1] * smooth,
+            curr.root[2] * (1 - smooth) + interpolatedRoot[2] * smooth,
         ];
         this.avatar.applyFrame({ ...curr, root, joints }, 1);
         this.currentRootPos.set(root[0], root[1], root[2]);
     }
 
-    async updateText() {
-        if (!this.sessionId || this.inputMode !== 'online') return;
-        const text = this.motionText.value.trim();
-        if (!text) return;
-        try {
-            if (this.realtimeSocket && this.realtimeSocket.readyState === WebSocket.OPEN) {
-                this.realtimeSocket.send(JSON.stringify({ type: 'input_text.append', text }));
-            } else {
-                const response = await fetch(`/api/realtime/sessions/${this.sessionId}/input_text`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ text }),
-                });
-                if (!response.ok) throw new Error('Text update failed');
-            }
-            this.setStatus(this.isPaused ? 'Paused' : 'Streaming');
-        } catch (error) {
-            this.setStatus('Error');
-        }
-    }
-
-    async togglePause() {
-        if (!this.sessionId) return;
-        const nextPaused = !this.isPaused;
-        try {
-            if (this.realtimeSocket && this.realtimeSocket.readyState === WebSocket.OPEN) {
-                this.realtimeSocket.send(JSON.stringify({ type: nextPaused ? 'session.pause' : 'session.resume' }));
-            }
-        } catch (error) {
-            this.setStatus('Error');
-        }
-    }
-
     async reset(callApi = true) {
         const sessionId = this.sessionId;
         this.isRunning = false;
-        this.isPaused = false;
         this.sessionId = null;
         this.closeSockets();
         this.clearTimer();
-        if (callApi && sessionId) {
-            try {
-                await fetch(`/api/realtime/sessions/${sessionId}/close`, { method: 'POST' });
-            } catch (error) {
-                // Reset is best-effort because closed sockets already stop the local view.
-            }
-        }
+        void callApi;
+        void sessionId;
         this.setStatus('Idle');
         this.frameCount = 0;
         this.motionFpsCounter = 0;
@@ -551,12 +470,12 @@ class MotionApp {
         this.updateFrameDisplay(0);
         this.fpsEl.textContent = '0';
         this.updateBufferDisplay(0, this.bufferCapacity);
+        this.updateLatencyDisplay();
         this.setButtonState();
     }
 
     sendResetBeacon() {
-        if (!this.sessionId) return;
-        navigator.sendBeacon(`/api/realtime/sessions/${this.sessionId}/close`, new Blob([], { type: 'application/json' }));
+        return;
     }
 
     closeSockets() {
@@ -583,6 +502,7 @@ class MotionApp {
     }
 
     updateBufferDisplay(size, capacity) {
+        if (!this.bufferSizeEl) return;
         const bufferSize = Number.isFinite(size) ? size : Math.min(this.bufferCapacity, this.frameCount);
         const bufferCapacity = Number.isFinite(capacity) ? capacity : this.bufferCapacity;
         this.bufferCapacity = bufferCapacity;
@@ -590,10 +510,9 @@ class MotionApp {
     }
 
     openConfig() {
-        this.modalHistoryLength.value = String(this.historyLength);
         this.modalSeed.value = String(this.generationSeed);
-        this.modalSmoothingAlpha.value = String(this.smoothingAlpha);
-        this.modalSmoothingValue.textContent = this.smoothingAlpha.toFixed(2);
+        this.modalSmooth.value = String(this.smooth);
+        this.modalSmoothValue.textContent = this.smooth.toFixed(2);
         this.configModal.hidden = false;
     }
 
@@ -602,24 +521,16 @@ class MotionApp {
     }
 
     async saveConfig() {
-        const nextHistory = Math.max(1, Math.min(16, Number(this.modalHistoryLength.value) || 4));
         const nextSeed = Math.max(0, Math.min(2147483647, Math.floor(Number(this.modalSeed.value) || 0)));
-        const nextSmoothing = Math.max(0, Math.min(1, Number(this.modalSmoothingAlpha.value)));
+        const nextSmooth = Math.max(0, Math.min(1, Number(this.modalSmooth.value)));
         const shouldRestart = this.isRunning;
-        this.historyLength = nextHistory;
         this.generationSeed = nextSeed;
-        this.smoothingAlpha = nextSmoothing;
-        this.syncConfigLabels();
+        this.smooth = nextSmooth;
         this.closeConfig();
         if (shouldRestart) {
             await this.reset();
             await this.start();
         }
-    }
-
-    syncConfigLabels() {
-        this.currentSmoothingEl.textContent = this.smoothingAlpha.toFixed(2);
-        this.currentHistoryEl.textContent = String(this.historyLength);
     }
 
     setStatus(status) {
@@ -629,48 +540,53 @@ class MotionApp {
     startTimer() {
         this.timerStartedAt = performance.now();
         this.timerStoppedAt = null;
-        this.updateElapsedDisplay();
+        this.latencyRecorded = false;
+        this.latencySeconds = null;
+        this.updateLatencyDisplay();
     }
 
     stopTimer() {
         if (this.timerStartedAt !== null && this.timerStoppedAt === null) {
             this.timerStoppedAt = performance.now();
-            this.updateElapsedDisplay();
         }
     }
 
     clearTimer() {
         this.timerStartedAt = null;
         this.timerStoppedAt = null;
-        this.updateElapsedDisplay();
+        this.latencyRecorded = false;
+        this.latencySeconds = null;
+        this.updateLatencyDisplay();
     }
 
-    updateElapsedDisplay(now = performance.now()) {
-        if (!this.elapsedTimeEl) return;
+    recordLatency() {
+        if (this.latencyRecorded || this.timerStartedAt === null) return;
+        this.latencySeconds = Math.max(0, (performance.now() - this.timerStartedAt) / 1000);
+        this.latencyRecorded = true;
+        this.updateLatencyDisplay();
+    }
+
+    updateLatencyDisplay() {
+        if (!this.latencyEl) return;
         if (this.timerStartedAt === null) {
-            this.elapsedTimeEl.textContent = '0.00s';
+            this.latencyEl.textContent = '0.00s';
             return;
         }
-        const end = this.timerStoppedAt ?? now;
-        const seconds = Math.max(0, (end - this.timerStartedAt) / 1000);
-        this.elapsedTimeEl.textContent = `${seconds.toFixed(2)}s`;
+        if (!this.latencyRecorded || this.latencySeconds === null) {
+            this.latencyEl.textContent = '...';
+            return;
+        }
+        this.latencyEl.textContent = `${this.latencySeconds.toFixed(2)}s`;
     }
 
     setControlsLocked(locked) {
         this.startResetBtn.disabled = locked;
-        this.updateBtn.disabled = locked || !this.isRunning || this.inputMode !== 'online';
-        this.pauseResumeBtn.disabled = locked || !this.isRunning;
         this.configBtn.disabled = false;
     }
 
     setButtonState() {
         this.startResetBtn.disabled = false;
         this.startResetBtn.textContent = this.isRunning ? 'Reset' : 'Start';
-        this.updateBtn.disabled = !this.isRunning || this.inputMode !== 'online';
-        this.pauseResumeBtn.disabled = !this.isRunning;
-        this.pauseResumeBtn.textContent = this.isPaused ? 'Resume' : 'Pause';
-        this.pauseResumeBtn.classList.toggle('btn-success', this.isPaused);
-        this.pauseResumeBtn.classList.toggle('btn-warning', !this.isPaused);
         this.onlineModeBtn.disabled = this.isRunning;
         this.offlineModeBtn.disabled = this.isRunning;
         this.addCueBtn.disabled = this.isRunning;
@@ -682,9 +598,6 @@ class MotionApp {
     animate() {
         requestAnimationFrame(() => this.animate());
         const now = performance.now();
-        if (this.timerStartedAt !== null && this.timerStoppedAt === null) {
-            this.updateElapsedDisplay(now);
-        }
         this.applyInterpolatedDisplayFrame(now);
         if (now - this.lastUserInteraction > this.autoFollowDelay) {
             this.controls.target.lerp(

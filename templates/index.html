@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Motion Generation Demo</title>
-    <link rel="stylesheet" href="/static/css/style.css?v=multi-grid-2x4">
+    <link rel="stylesheet" href="/static/css/style.css?v=single-clean">
 </head>
 <body>
     <main class="container">
@@ -19,11 +19,7 @@
                     <span id="status" class="status-value">Idle</span>
                 </div>
                 <div class="status-item">
-                    <span class="status-label">Buffer:</span>
-                    <span id="bufferSize" class="status-value">0 / 4</span>
-                </div>
-                <div class="status-item">
-                    <span class="status-label">Motion FPS:</span>
+                    <span class="status-label">FPS:</span>
                     <span id="fps" class="status-value">0</span>
                 </div>
                 <div class="status-item">
@@ -31,16 +27,8 @@
                     <span id="frameCount" class="status-value">0</span>
                 </div>
                 <div class="status-item">
-                    <span class="status-label">Elapsed:</span>
-                    <span id="elapsedTime" class="status-value">0.00s</span>
-                </div>
-                <div class="status-item">
-                    <span class="status-label">Smoothing α:</span>
-                    <span id="currentSmoothing" class="status-value">0.50</span>
-                </div>
-                <div class="status-item">
-                    <span class="status-label">History:</span>
-                    <span id="currentHistory" class="status-value">4</span>
+                    <span class="status-label">Latency:</span>
+                    <span id="latency" class="status-value">0.00s</span>
                 </div>
             </div>
 
@@ -71,10 +59,7 @@
 
             <div class="button-group">
                 <button id="startResetBtn" class="btn btn-primary" type="button">Start</button>
-                <button id="updateBtn" class="btn btn-secondary" type="button" disabled>Send Text</button>
-                <button id="pauseResumeBtn" class="btn btn-warning" type="button" disabled>Pause</button>
                 <button id="configBtn" class="btn" type="button">Config</button>
-                <a class="btn" href="/multi">Multi Grid</a>
             </div>
 
         </section>
@@ -83,51 +68,25 @@
             <canvas id="renderCanvas"></canvas>
         </section>
 
-        <section class="info">
-            <div class="description-box">
-                <strong>Start/Reset:</strong> Start when idle, reset when running and open a new realtime session.
-                <strong>Send Text:</strong> In Online mode, press Enter or send text while streaming.
-                <strong>Pause/Resume:</strong> Pause or resume generation while preserving state.
-            </div>
-            <p class="note">
-                Online mode streams text updates immediately. Offline mode sends a text timeline at session creation. Target Motion FPS: 20. Use mouse to orbit camera.
-            </p>
-        </section>
     </main>
 
     <div id="configModal" class="modal-overlay" hidden>
         <div class="modal-content" role="dialog" aria-modal="true" aria-labelledby="configTitle">
             <div class="modal-header">
-                <h2 id="configTitle">Config Editor</h2>
+                <h2 id="configTitle">Config</h2>
             </div>
             <div class="modal-body">
-                <section class="config-section">
-                    <h3>Schedule Config</h3>
-                    <div id="scheduleConfigFields"></div>
-                </section>
-                <section class="config-section">
-                    <h3>CFG Config</h3>
-                    <div id="cfgConfigFields"></div>
-                </section>
-                <section class="config-section">
-                    <h3>Runtime Parameters</h3>
-                    <div class="config-field">
-                        <label for="modalHistoryLength">History Length</label>
-                        <input id="modalHistoryLength" type="number" min="1" max="16" value="4">
+                <div class="config-field">
+                    <label for="modalSeed">Seed</label>
+                    <input id="modalSeed" type="number" min="0" max="2147483647" value="11">
+                </div>
+                <div class="config-field">
+                    <label for="modalSmooth">Smooth</label>
+                    <div class="slider-container">
+                        <input id="modalSmooth" type="range" min="0" max="1" step="0.05" value="0">
+                        <span id="modalSmoothValue" class="slider-value">0.00</span>
                     </div>
-                    <div class="config-field">
-                        <label for="modalSeed">Seed</label>
-                        <input id="modalSeed" type="number" min="0" max="2147483647" value="11">
-                    </div>
-                    <div class="config-field">
-                        <label for="modalSmoothingAlpha">Smoothing α</label>
-                        <div class="slider-container">
-                            <input id="modalSmoothingAlpha" type="range" min="0" max="1" step="0.05" value="1">
-                            <span id="modalSmoothingValue" class="slider-value">1.00</span>
-                        </div>
-                        <span class="param-hint">0.0 = max smoothing, 1.0 = no smoothing</span>
-                    </div>
-                </section>
+                </div>
             </div>
             <div class="modal-footer">
                 <button id="configDiscardBtn" class="btn btn-secondary" type="button">Discard</button>
@@ -143,6 +102,6 @@
     <script src="/static/js/avatars/g1-avatar.js"></script>
     <script src="/static/js/avatars/smplx-avatar.js"></script>
     <script src="/static/js/avatars/avatar-factory.js"></script>
-    <script src="/static/js/main.js"></script>
+    <script src="/static/js/main.js?v=smooth-zero-buttons-clean"></script>
 </body>
 </html>

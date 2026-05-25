@@ -1,121 +1,106 @@
----
-title: FloodScene Realtime Motion API
-sdk: docker
-app_port: 7860
----
+# Motion Generation Demo
 
-# FloodScene Realtime Motion API
-
-Local FastAPI prototype for FloodDiffusion-style realtime motion streaming.
-
-The browser opens a realtime session, receives binary motion frames over one
-WebSocket, and sends control/text events on that same socket. The visualization
-runtime is pluggable: Unitree G1 is the default mesh renderer, and SMPL-X remains
-available through the renderer registry.
+Local FastAPI demo for text-to-motion visualization. The local app owns only the
+browser UI, topology endpoints, and WebSocket forwarding. Actual G1 motion
+generation runs in the remote Kimodo API.
 
 ## Run
 
+Start or tunnel the remote Kimodo API first, then run the local demo:
+
 ```bash
+KIMODO_G1_API_URL=http://127.0.0.1:9001 \
+KIMODO_G1_SEED=11 \
+KIMODO_G1_DIFFUSION_STEPS=20 \
 uvicorn app:app --host 127.0.0.1 --port 7861
 ```
 
-Open `http://127.0.0.1:7861`.
+Open:
 
-For eight-way random seed comparison, run the local app with an API pool and open
-`http://127.0.0.1:7861/multi`:
-
-```bash
-KIMODO_G1_API_URLS=http://127.0.0.1:9000,http://127.0.0.1:9001,http://127.0.0.1:9002,http://127.0.0.1:9003,http://127.0.0.1:9004,http://127.0.0.1:9005,http://127.0.0.1:9006,http://127.0.0.1:9007 \
-uvicorn app:app --host 127.0.0.1 --port 7861
+```text
+http://127.0.0.1:7861/
 ```
 
-## Asset Sources
+## Current Code Shape
 
-Large model and mesh assets are not committed. Put them in the ignored cache
-folders below when setting up a new machine.
+```text
+app.py
+  # Local FastAPI entrypoint
+  # Serves the page
+  # Provides /api/config, /api/g1/topology, /api/smplx/topology
+  # Provides WS /api/offline
+  # Calls remote Kimodo G1 API and forwards binary motion frames to the frontend
 
-- SMPL-X body model for the local renderer: the repo-local cache path is
-  `.smplx_cache/SMPLX_NEUTRAL_2020.npz`, and the renderer uses neutral gender
-  with all-zero betas. Existing local copies under `/mnt/data/cpfs/motion_data`
-  are:
-  - `/mnt/data/cpfs/motion_data/smplx_models/smplx/SMPLX_NEUTRAL_2020.npz`
-  - `/mnt/data/cpfs/motion_data/smplx_models/smplx/SMPLX_NEUTRAL.npz`
-- Kimodo SMPL-X checkpoint, if SMPL-X generation is enabled later:
-  `https://huggingface.co/nvidia/Kimodo-SMPLX-RP-v1`. This model is gated; see
-  NVIDIA's Kimodo SMPL-X setup note:
-  `https://research.nvidia.com/labs/sil/projects/kimodo/docs/getting_started/installation_smpl.html`.
-- Unitree G1 mesh/skeleton assets for the local renderer:
-  `.g1_cache/g1skel34/`. Copy the `g1skel34` directory from the official Kimodo
-  repo at
-  `https://github.com/nv-tlabs/kimodo/tree/main/kimodo/assets/skeletons/g1skel34`.
-  The directory should contain `joints.p`, `rest_pose_local_rot.p`,
-  `skeleton_data.npz`, `xml/g1.xml`, and `meshes/g1/*.STL`.
-- Kimodo G1 generation checkpoint for the remote API:
-  `https://huggingface.co/nvidia/Kimodo-G1-RP-v1`. The current motion server
-  path is `/mnt/data/cpfs/haiyang/kimodo-api/checkpoints/Kimodo-G1-RP-v1`.
+templates/index.html
+  # Single demo page
 
-## Code Shape
+static/css/style.css
+  # Page styling
 
-- `app.py`: FastAPI routes, realtime session WebSocket, budget gate.
-- `api/`: Pydantic request schemas.
-- `sessions/`: session lifecycle, online/offline text state, schedule lookup.
-- `renderers/`: renderer registry and runtime adapters for `g1` and `smplx`.
-- `static/js/avatars/`: frontend avatar implementations.
-- `static/js/main.js`: UI state machine and realtime client.
+static/js/main.js
+  # UI state
+  # Reads online/offline text input
+  # Opens /api/offline websocket
+  # Receives motion frames
+  # Handles playback, status, latency, seed, smooth
 
-## Realtime API
+static/js/avatars/
+  # Three.js avatar display code
+  # G1 mesh avatar
+  # SMPL-X avatar
 
-Create a session:
-
-```http
-POST /api/realtime/sessions
+renderers/
+  # Python renderer adapters
+  # G1 topology + binary frame encoding
+  # SMPL-X topology + binary frame encoding
 ```
 
-Online payload:
+## Local API
+
+```text
+GET /api/config
+GET /api/g1/topology
+GET /api/smplx/topology
+WS  /api/offline
+```
+
+`/api/offline` expects the first WebSocket message to contain a schedule and
+config:
 
 ```json
 {
   "renderer": "g1",
-  "input_mode": "online",
-  "initial_text": "walk in a circle.",
-  "frame_rate": 20,
-  "seed": 11,
-  "kimodo_worker_index": 0
-}
-```
-
-Offline payload:
-
-```json
-{
-  "renderer": "g1",
-  "input_mode": "offline",
-  "frame_rate": 20,
-  "seed": 11,
-  "kimodo_worker_index": 0,
+  "config": {
+    "seed": 11,
+    "smooth": 0
+  },
   "schedule": [
     { "text": "walk forward", "start": 0 },
-    { "text": "turn left", "start": 5 },
-    { "text": "wave hand", "start": 9, "end": 14 }
+    { "text": "dance", "start": 4, "end": 8 }
   ]
 }
 ```
 
-Connect to:
+The WebSocket returns JSON lifecycle events plus binary motion frames.
 
-```text
-ws://HOST/api/realtime/sessions/{session_id}
+## Assets
+
+Large model and mesh assets are not committed.
+
+- Unitree G1 local renderer assets:
+  `.g1_cache/g1skel34/`
+- SMPL-X local renderer model:
+  `.smplx_cache/SMPLX_NEUTRAL_2020.npz`
+- Existing SMPL-X copies on the motion server:
+  `/mnt/data/cpfs/motion_data/smplx_models/smplx/SMPLX_NEUTRAL_2020.npz`
+  `/mnt/data/cpfs/motion_data/smplx_models/smplx/SMPLX_NEUTRAL.npz`
+- Remote Kimodo G1 checkpoint path:
+  `/mnt/data/cpfs/haiyang/kimodo-api/checkpoints/Kimodo-G1-RP-v1`
+
+## Requirements
+
+Install Python deps with:
+
+```bash
+pip install -r requirements.txt
 ```
-
-The WebSocket sends JSON lifecycle events plus binary motion frames. It accepts
-JSON control events:
-
-```json
-{ "type": "input_text.append", "text": "wave hand while walking" }
-{ "type": "session.pause" }
-{ "type": "session.resume" }
-{ "type": "session.close" }
-```
-
-Offline schedules require the first cue to start at `0`, strictly increasing cue
-starts, and an `end` time on the final cue.
