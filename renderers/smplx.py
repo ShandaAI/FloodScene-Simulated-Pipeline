@@ -75,6 +75,13 @@ class SMPLXRuntime:
         self.load()
         assert self.v_template is not None
         assert self.faces is not None
+        assert self.joints is not None
+        assert self.parents is not None
+        assert self.weights is not None
+        top_indices = np.argsort(self.weights, axis=1)[:, -4:][:, ::-1].astype(np.uint16)
+        top_weights = np.take_along_axis(self.weights, top_indices.astype(np.int64), axis=1).astype(np.float32)
+        top_sums = np.maximum(top_weights.sum(axis=1, keepdims=True), 1e-8)
+        top_weights = top_weights / top_sums
         return {
             "available": True,
             "model": "SMPLX_NEUTRAL_2020",
@@ -85,6 +92,11 @@ class SMPLXRuntime:
             "vertex_count": int(self.v_template.shape[0]),
             "face_count": int(self.faces.shape[0]),
             "faces": self.faces.reshape(-1).astype(int).tolist(),
+            "v_template": self.v_template.reshape(-1).astype(float).tolist(),
+            "joints": self.joints.reshape(-1).astype(float).tolist(),
+            "parents": self.parents.astype(int).tolist(),
+            "skin_indices": top_indices.reshape(-1).astype(int).tolist(),
+            "skin_weights": top_weights.reshape(-1).astype(float).tolist(),
         }
 
     @staticmethod
@@ -189,13 +201,37 @@ class SMPLXRuntime:
 
     def frame_arrays(self, render_input: RenderInput, t: float) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         self.load()
+        assert self.joints is not None
+
+        poses, pelvis_abs = self._pose_for_input(render_input, t)
+        return self._frame_arrays_from_full_pose(poses, pelvis_abs - self.joints[0])
+
+    def frame_arrays_from_smpl_params(
+        self,
+        *,
+        root_orient: np.ndarray,
+        pose_body: np.ndarray,
+        trans: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        poses = np.zeros((55, 3), dtype=np.float32)
+        poses[0] = np.asarray(root_orient, dtype=np.float32).reshape(3)
+        poses[1:22] = np.asarray(pose_body, dtype=np.float32).reshape(21, 3)
+        return self._frame_arrays_from_full_pose(poses, np.asarray(trans, dtype=np.float32).reshape(3))
+
+    def _frame_arrays_from_full_pose(
+        self,
+        poses: np.ndarray,
+        translation: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        self.load()
         assert self.v_template is not None
         assert self.posedirs is not None
         assert self.joints is not None
         assert self.parents is not None
         assert self.weights is not None
 
-        poses, pelvis_abs = self._pose_for_input(render_input, t)
+        poses = np.asarray(poses, dtype=np.float32).reshape(55, 3)
+        translation = np.asarray(translation, dtype=np.float32).reshape(3)
         rot_mats = self._axis_angle_to_matrix(poses)
         pose_feature = (rot_mats[1:] - np.eye(3, dtype=np.float32)).reshape(-1)
         v_posed = self.v_template + np.einsum("vcp,p->vc", self.posedirs, pose_feature, optimize=True)
@@ -227,10 +263,9 @@ class SMPLXRuntime:
         v_homo = np.ones((v_posed.shape[0], 4), dtype=np.float32)
         v_homo[:, :3] = v_posed
         verts = np.einsum("vcd,vd->vc", blend_tf[:, :3, :], v_homo, optimize=True)
-        transl = pelvis_abs - self.joints[0]
-        verts += transl[None, :]
-        posed_joints = global_tf[:22, :3, 3] + transl[None, :]
-        return verts.astype(np.float32), pelvis_abs.astype(np.float32), posed_joints.astype(np.float32)
+        verts += translation[None, :]
+        posed_joints = global_tf[:22, :3, 3] + translation[None, :]
+        return verts.astype(np.float32), posed_joints[0].astype(np.float32), posed_joints.astype(np.float32)
 
     def binary_frame(
         self,
@@ -242,14 +277,42 @@ class SMPLXRuntime:
         buffer_capacity: int,
     ) -> bytes:
         verts, pelvis_abs, joints = self.frame_arrays(render_input, t)
+        return self.binary_frame_from_arrays(
+            vertices=verts,
+            joints=joints,
+            root_position=pelvis_abs,
+            frame_id=frame_id,
+            audio_level=render_input.audio_level,
+            video_energy=render_input.video_energy,
+            budget_remaining=budget_remaining,
+            buffer_size=buffer_size,
+            buffer_capacity=buffer_capacity,
+        )
+
+    def binary_frame_from_arrays(
+        self,
+        *,
+        vertices: np.ndarray,
+        joints: np.ndarray,
+        root_position: np.ndarray,
+        frame_id: int,
+        audio_level: float,
+        video_energy: float,
+        budget_remaining: float,
+        buffer_size: int,
+        buffer_capacity: int,
+    ) -> bytes:
+        vertices = np.asarray(vertices, dtype=np.float32).reshape(-1, 3)
+        joints = np.asarray(joints, dtype=np.float32).reshape(22, 3)
+        root_position = np.asarray(root_position, dtype=np.float32).reshape(3)
         header = np.array(
             [
                 frame_id,
-                pelvis_abs[0],
-                pelvis_abs[1],
-                pelvis_abs[2],
-                render_input.audio_level,
-                render_input.video_energy,
+                root_position[0],
+                root_position[1],
+                root_position[2],
+                audio_level,
+                video_energy,
                 budget_remaining,
                 buffer_size,
                 buffer_capacity,
@@ -259,9 +322,8 @@ class SMPLXRuntime:
         packet = np.concatenate(
             [
                 header,
-                verts.reshape(-1).astype(np.float32),
+                vertices.reshape(-1).astype(np.float32),
                 joints.reshape(-1).astype(np.float32),
             ]
         )
         return packet.astype("<f4", copy=False).tobytes()
-

@@ -4,16 +4,22 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Motion Generation Demo</title>
-    <link rel="stylesheet" href="/static/css/style.css?v=single-clean">
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="/static/css/style.css?v=header-mode-2">
 </head>
 <body>
     <main class="container">
         <header class="header">
             <h1>Motion Generation Demo</h1>
+            <div class="input-mode-group header-mode-group" role="group" aria-label="Input mode">
+                <button id="onlineModeBtn" class="mode-btn active" type="button">Online</button>
+                <button id="offlineModeBtn" class="mode-btn" type="button">Offline</button>
+                <button id="offlineAudioModeBtn" class="mode-btn" type="button">Offline Audio</button>
+            </div>
         </header>
 
         <section class="controls">
-            <div class="status-group">
+            <div class="status-group" hidden>
                 <div class="status-item">
                     <span class="status-label">Status:</span>
                     <span id="status" class="status-value">Idle</span>
@@ -30,11 +36,10 @@
                     <span class="status-label">Latency:</span>
                     <span id="latency" class="status-value">0.00s</span>
                 </div>
-            </div>
-
-            <div class="input-mode-group" role="group" aria-label="Input mode">
-                <button id="onlineModeBtn" class="mode-btn active" type="button">Online</button>
-                <button id="offlineModeBtn" class="mode-btn" type="button">Offline</button>
+                <div class="status-item">
+                    <span class="status-label">Audio:</span>
+                    <span id="audioStatus" class="status-value">Idle</span>
+                </div>
             </div>
 
             <div id="onlineInputPanel" class="input-panel">
@@ -57,8 +62,25 @@
                 <div id="offlineScheduleRows" class="offline-schedule"></div>
             </div>
 
+            <div id="offlineAudioInputPanel" class="input-panel offline-panel" hidden>
+                <div class="offline-schedule-header">
+                    <span>Offline Audio Schedule</span>
+                    <button id="addAudioCueBtn" class="btn btn-compact" type="button">Add Audio</button>
+                </div>
+                <div id="offlineAudioRows" class="offline-schedule"></div>
+            </div>
+
             <div class="button-group">
                 <button id="startResetBtn" class="btn btn-primary" type="button">Start</button>
+                <label class="record-toggle" title="Record motion view and audio">
+                    <input id="recordToggle" type="checkbox" autocomplete="off">
+                    <span>Record</span>
+                </label>
+                <span id="recordingResult" class="recording-result" hidden>
+                    <span id="recordingStatus" class="recording-status"></span>
+                    <a id="recordingViewLink" class="recording-link" href="#" target="_blank" rel="noopener" hidden>View</a>
+                    <a id="recordingDownloadLink" class="recording-link" href="#" download="motion-recording.mp4" hidden>Download</a>
+                </span>
                 <button id="configBtn" class="btn" type="button">Config</button>
             </div>
 
@@ -100,8 +122,8 @@
     <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/STLLoader.js"></script>
     <script src="/static/js/avatars/base-avatar.js"></script>
     <script src="/static/js/avatars/g1-avatar.js"></script>
-    <script src="/static/js/avatars/smplx-avatar.js"></script>
+    <script src="/static/js/avatars/smplx-avatar.js?v=params-2"></script>
     <script src="/static/js/avatars/avatar-factory.js"></script>
-    <script src="/static/js/main.js?v=smooth-zero-buttons-clean"></script>
+    <script src="/static/js/main.js?v=subtitle-waveform-3"></script>
 </body>
 </html>
