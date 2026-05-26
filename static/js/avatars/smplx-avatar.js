@@ -7,6 +7,9 @@ class SMPLXAvatar extends BaseAvatar {
         this.geometry = null;
         this.positionAttribute = null;
         this.vertexCount = 0;
+        this.smplBones = [];
+        this.smplSkeleton = null;
+        this.restJoints = null;
         this.previousVertices = null;
         this.previousJoints = null;
         this.trailPoints = [];
@@ -28,6 +31,7 @@ class SMPLXAvatar extends BaseAvatar {
             roughness: 0.66,
             metalness: 0.02,
             side: THREE.FrontSide,
+            skinning: true,
         });
 
         this.initTrail();
@@ -43,16 +47,26 @@ class SMPLXAvatar extends BaseAvatar {
 
         const topology = await response.json();
         this.vertexCount = topology.vertex_count;
-        const positions = new Float32Array(this.vertexCount * 3);
+        const positions = topology.v_template ? new Float32Array(topology.v_template) : new Float32Array(this.vertexCount * 3);
         const faces = new Uint32Array(topology.faces);
 
         this.geometry = new THREE.BufferGeometry();
         this.positionAttribute = new THREE.BufferAttribute(positions, 3);
         this.geometry.setAttribute('position', this.positionAttribute);
         this.geometry.setIndex(new THREE.BufferAttribute(faces, 1));
+        if (topology.skin_indices && topology.skin_weights) {
+            this.geometry.setAttribute('skinIndex', new THREE.Uint16BufferAttribute(new Uint16Array(topology.skin_indices), 4));
+            this.geometry.setAttribute('skinWeight', new THREE.Float32BufferAttribute(new Float32Array(topology.skin_weights), 4));
+        }
         this.geometry.computeVertexNormals();
 
-        this.mesh = new THREE.Mesh(this.geometry, this.material);
+        if (topology.joints && topology.parents && topology.skin_indices && topology.skin_weights) {
+            this.restJoints = new Float32Array(topology.joints);
+            this.mesh = new THREE.SkinnedMesh(this.geometry, this.material);
+            this.initSkinnedSkeleton(this.restJoints, topology.parents);
+        } else {
+            this.mesh = new THREE.Mesh(this.geometry, this.material);
+        }
         this.mesh.castShadow = true;
         this.mesh.receiveShadow = true;
         this.mesh.frustumCulled = false;
@@ -60,6 +74,32 @@ class SMPLXAvatar extends BaseAvatar {
         this.scene.add(this.mesh);
 
         return topology;
+    }
+
+    initSkinnedSkeleton(restJoints, parents) {
+        this.smplBones = [];
+        for (let i = 0; i < parents.length; i++) {
+            const bone = new THREE.Bone();
+            bone.name = `smplx_${i}`;
+            const parent = Number(parents[i]);
+            const x = restJoints[i * 3];
+            const y = restJoints[i * 3 + 1];
+            const z = restJoints[i * 3 + 2];
+            if (parent >= 0 && parent < i) {
+                bone.position.set(
+                    x - restJoints[parent * 3],
+                    y - restJoints[parent * 3 + 1],
+                    z - restJoints[parent * 3 + 2],
+                );
+                this.smplBones[parent].add(bone);
+            } else {
+                bone.position.set(x, y, z);
+            }
+            this.smplBones.push(bone);
+        }
+        if (this.smplBones[0]) this.mesh.add(this.smplBones[0]);
+        this.smplSkeleton = new THREE.Skeleton(this.smplBones);
+        this.mesh.bind(this.smplSkeleton);
     }
 
     updateMesh(flatVertices, root, flatJoints, smoothingAlpha = 1) {
@@ -89,6 +129,26 @@ class SMPLXAvatar extends BaseAvatar {
         if (packet.length <= headerSize || !this.vertexCount) return null;
         const vertexValueCount = this.vertexCount * 3;
         const jointValueCount = 22 * 3;
+        const paramsValueCount = 3 + 21 * 3 + 3 + jointValueCount;
+        if (packet.length === headerSize + paramsValueCount) {
+            let offset = headerSize;
+            const rootOrient = packet.subarray(offset, offset + 3);
+            offset += 3;
+            const poseBody = packet.subarray(offset, offset + 21 * 3);
+            offset += 21 * 3;
+            const trans = packet.subarray(offset, offset + 3);
+            offset += 3;
+            return {
+                frameId: Math.round(packet[0]),
+                root: [packet[1], packet[2], packet[3]],
+                bufferSize: Math.round(packet[7]),
+                bufferCapacity: Math.round(packet[8]),
+                rootOrient,
+                poseBody,
+                trans,
+                joints: packet.subarray(offset, offset + jointValueCount),
+            };
+        }
         if (packet.length < headerSize + vertexValueCount + jointValueCount) return null;
 
         return {
@@ -102,7 +162,44 @@ class SMPLXAvatar extends BaseAvatar {
     }
 
     applyFrame(frame, smoothingAlpha = 1) {
-        this.updateMesh(frame.vertices, frame.root, frame.joints, smoothingAlpha);
+        if (frame.rootOrient && frame.poseBody && frame.trans && this.smplBones.length) {
+            this.updateSkinnedPose(frame.rootOrient, frame.poseBody, frame.trans, frame.root, frame.joints);
+        } else {
+            this.updateMesh(frame.vertices, frame.root, frame.joints, smoothingAlpha);
+        }
+    }
+
+    updateSkinnedPose(rootOrient, poseBody, trans, root, flatJoints) {
+        if (!this.mesh || !this.smplBones.length || !this.restJoints) return;
+        this.setBoneAxisAngle(this.smplBones[0], rootOrient, 0);
+        this.smplBones[0].position.set(
+            this.restJoints[0] + trans[0],
+            this.restJoints[1] + trans[1],
+            this.restJoints[2] + trans[2],
+        );
+        for (let i = 1; i < this.smplBones.length; i++) {
+            if (i <= 21) {
+                this.setBoneAxisAngle(this.smplBones[i], poseBody, (i - 1) * 3);
+            } else {
+                this.smplBones[i].quaternion.identity();
+            }
+        }
+        if (this.smplSkeleton) this.smplSkeleton.update();
+        this.mesh.visible = true;
+        if (flatJoints) this.updateSkeleton(flatJoints, 1);
+        if (root) this.updateTrail(root);
+    }
+
+    setBoneAxisAngle(bone, values, offset) {
+        const x = values[offset];
+        const y = values[offset + 1];
+        const z = values[offset + 2];
+        const angle = Math.hypot(x, y, z);
+        if (angle < 1e-8) {
+            bone.quaternion.identity();
+            return;
+        }
+        bone.quaternion.setFromAxisAngle(new THREE.Vector3(x / angle, y / angle, z / angle), angle);
     }
 
     initSkeletonOverlay() {
