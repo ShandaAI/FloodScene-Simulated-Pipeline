@@ -1,6 +1,31 @@
 # API
 
-## Remote API
+## Remote APIs
+
+### FloodDiffusion online API
+
+The online tab uses a GPU-backed FloodDiffusion API. The local FastAPI app does
+not load model weights; it proxies browser requests to the configured API:
+
+```bash
+FLOODDIFFUSION_API_URL=http://127.0.0.1:7870
+```
+
+Expected upstream endpoints:
+
+```text
+GET    /health
+GET    /v1/smplh/static
+POST   /v1/sessions
+POST   /v1/sessions/{session_id}/text
+GET    /v1/sessions/{session_id}/stream?batch_size=4&realtime=1
+DELETE /v1/sessions/{session_id}
+```
+
+The stream returns SSE `motion` events with SMPL-H 22-joint rotmats,
+translations, and joints. The browser renders the SMPL-H mesh client-side.
+
+### Kimodo offline API
 
 Start on `motion-haiyang`:
 
@@ -46,6 +71,12 @@ Supported local endpoints:
 
 ```text
 GET /api/config
+GET /api/flooddiffusion/health
+GET /api/flooddiffusion/smplh/static
+POST /api/flooddiffusion/sessions
+POST /api/flooddiffusion/sessions/{session_id}/text
+GET /api/flooddiffusion/sessions/{session_id}/stream
+DELETE /api/flooddiffusion/sessions/{session_id}
 GET /api/g1/topology
 GET /api/smplx/topology
 WS  /api/offline

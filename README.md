@@ -1,14 +1,15 @@
 # Motion Generation Demo
 
 Local FastAPI demo for text-to-motion visualization. The local app owns only the
-browser UI, topology endpoints, and WebSocket forwarding. Actual G1 motion
-generation runs in the remote Kimodo API.
+browser UI, topology endpoints, WebSocket forwarding, and a thin
+FloodDiffusion API proxy. Actual motion generation runs in external APIs.
 
 ## Run
 
-Start or tunnel the remote Kimodo API first, then run the local demo:
+Start or tunnel the remote APIs first, then run the local demo:
 
 ```bash
+FLOODDIFFUSION_API_URL=http://127.0.0.1:7870 \
 KIMODO_G1_API_URL=http://127.0.0.1:9001 \
 KIMODO_G1_SEED=11 \
 KIMODO_G1_DIFFUSION_STEPS=20 \
@@ -28,6 +29,7 @@ app.py
   # Local FastAPI entrypoint
   # Serves the page
   # Provides /api/config, /api/g1/topology, /api/smplx/topology
+  # Proxies /api/flooddiffusion/* to the FloodDiffusion GPU API
   # Provides WS /api/offline
   # Calls remote Kimodo G1 API and forwards binary motion frames to the frontend
 
@@ -40,7 +42,8 @@ static/css/style.css
 static/js/main.js
   # UI state
   # Reads online/offline text input
-  # Opens /api/offline websocket
+  # Online: streams FloodDiffusion SMPL-H motion through /api/flooddiffusion
+  # Offline: opens /api/offline websocket
   # Receives motion frames
   # Handles playback, status, latency, seed, smooth
 
@@ -48,6 +51,7 @@ static/js/avatars/
   # Three.js avatar display code
   # G1 mesh avatar
   # SMPL-X avatar
+  # SMPL-H FloodDiffusion mesh avatar
 
 renderers/
   # Python renderer adapters
@@ -61,9 +65,24 @@ Full API details are in `docs/api.md`.
 
 ```text
 GET /api/config
+GET /api/flooddiffusion/health
+GET /api/flooddiffusion/smplh/static
+POST /api/flooddiffusion/sessions
+POST /api/flooddiffusion/sessions/{session_id}/text
+GET /api/flooddiffusion/sessions/{session_id}/stream
+DELETE /api/flooddiffusion/sessions/{session_id}
 GET /api/g1/topology
 GET /api/smplx/topology
 WS  /api/offline
+```
+
+The online UI uses FloodDiffusion by default. Configure its remote API with:
+
+```bash
+FLOODDIFFUSION_API_URL=http://127.0.0.1:7870
+FLOODDIFFUSION_DEFAULT_CFG=5.0
+FLOODDIFFUSION_DEFAULT_HISTORY_LENGTH=30
+FLOODDIFFUSION_BATCH_SIZE=4
 ```
 
 `/api/offline` expects the first WebSocket message to contain a schedule and

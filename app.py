@@ -17,8 +17,8 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from renderers import DEFAULT_RENDERER, build_renderer_registry
@@ -28,6 +28,9 @@ BASE_DIR = Path(__file__).resolve().parent
 FRAME_RATE = 20
 PUBLIC_DAILY_BUDGET_SECONDS = 180
 G1_ASSET_ROOT = BASE_DIR / ".g1_cache" / "g1skel34"
+FLOODDIFFUSION_API_URL = os.getenv("FLOODDIFFUSION_API_URL", "http://127.0.0.1:7870").strip().rstrip("/")
+FLOODDIFFUSION_REQUEST_TIMEOUT = float(os.getenv("FLOODDIFFUSION_REQUEST_TIMEOUT", "60"))
+FLOODDIFFUSION_STREAM_TIMEOUT = float(os.getenv("FLOODDIFFUSION_STREAM_TIMEOUT", "600"))
 
 app = FastAPI(title="Motion Generation Demo")
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
@@ -134,6 +137,10 @@ class KimodoG1Client:
 kimodo_g1_client = KimodoG1Client.from_env()
 
 
+class FloodDiffusionAPIError(RuntimeError):
+    pass
+
+
 def _budget_remaining() -> float:
     return max(0.0, PUBLIC_DAILY_BUDGET_SECONDS - budget_used_seconds)
 
@@ -212,6 +219,38 @@ def _decode_g1_frame(event: dict[str, Any]) -> tuple[np.ndarray, np.ndarray, np.
     return joints, rotations, root_position
 
 
+def _flooddiffusion_url(path: str) -> str:
+    if not FLOODDIFFUSION_API_URL:
+        raise FloodDiffusionAPIError("FloodDiffusion API is not configured.")
+    return f"{FLOODDIFFUSION_API_URL}/{path.lstrip('/')}"
+
+
+def _flooddiffusion_json(
+    method: str,
+    path: str,
+    payload: dict[str, Any] | None = None,
+    *,
+    timeout: float | None = None,
+) -> dict[str, Any]:
+    body = None if payload is None else json.dumps(payload).encode("utf-8")
+    request = urllib.request.Request(
+        _flooddiffusion_url(path),
+        data=body,
+        headers={"Content-Type": "application/json", "Accept": "application/json"},
+        method=method,
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout or FLOODDIFFUSION_REQUEST_TIMEOUT) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise HTTPException(status_code=exc.code, detail=detail) from exc
+    except urllib.error.URLError as exc:
+        raise HTTPException(status_code=502, detail=f"FloodDiffusion API is unreachable: {exc.reason}") from exc
+    except TimeoutError as exc:
+        raise HTTPException(status_code=504, detail="FloodDiffusion API request timed out.") from exc
+
+
 @app.get("/", response_class=HTMLResponse)
 async def index() -> str:
     return (BASE_DIR / "templates" / "index.html").read_text()
@@ -238,7 +277,66 @@ async def get_config() -> dict[str, Any]:
         "budget_used_seconds": round(budget_used_seconds, 2),
         "budget_remaining_seconds": round(_budget_remaining(), 2),
         "offline": {"websocket_endpoint": "/api/offline"},
+        "online": {
+            "provider": "flooddiffusion",
+            "api_base_url": "/api/flooddiffusion",
+            "enabled": bool(FLOODDIFFUSION_API_URL),
+            "default_cfg": float(os.getenv("FLOODDIFFUSION_DEFAULT_CFG", "5.0")),
+            "default_history_length": int(os.getenv("FLOODDIFFUSION_DEFAULT_HISTORY_LENGTH", "30")),
+            "batch_size": int(os.getenv("FLOODDIFFUSION_BATCH_SIZE", "4")),
+        },
     }
+
+
+@app.get("/api/flooddiffusion/health")
+async def flooddiffusion_health() -> dict[str, Any]:
+    return await asyncio.to_thread(_flooddiffusion_json, "GET", "/health")
+
+
+@app.get("/api/flooddiffusion/smplh/static")
+async def flooddiffusion_smplh_static() -> dict[str, Any]:
+    return await asyncio.to_thread(_flooddiffusion_json, "GET", "/v1/smplh/static")
+
+
+@app.post("/api/flooddiffusion/sessions")
+async def flooddiffusion_create_session(request: Request) -> dict[str, Any]:
+    payload = await request.json()
+    return await asyncio.to_thread(_flooddiffusion_json, "POST", "/v1/sessions", payload)
+
+
+@app.post("/api/flooddiffusion/sessions/{session_id}/text")
+async def flooddiffusion_update_text(session_id: str, request: Request) -> dict[str, Any]:
+    payload = await request.json()
+    return await asyncio.to_thread(_flooddiffusion_json, "POST", f"/v1/sessions/{session_id}/text", payload)
+
+
+@app.delete("/api/flooddiffusion/sessions/{session_id}")
+async def flooddiffusion_stop_session(session_id: str) -> dict[str, Any]:
+    return await asyncio.to_thread(_flooddiffusion_json, "DELETE", f"/v1/sessions/{session_id}")
+
+
+@app.get("/api/flooddiffusion/sessions/{session_id}/stream")
+async def flooddiffusion_stream(session_id: str, request: Request) -> StreamingResponse:
+    query = request.url.query
+    path = f"/v1/sessions/{session_id}/stream"
+    if query:
+        path = f"{path}?{query}"
+
+    def iter_events() -> Iterable[bytes]:
+        upstream = urllib.request.Request(
+            _flooddiffusion_url(path),
+            headers={"Accept": "text/event-stream"},
+            method="GET",
+        )
+        try:
+            with urllib.request.urlopen(upstream, timeout=FLOODDIFFUSION_STREAM_TIMEOUT) as response:
+                for line in response:
+                    yield line
+        except Exception as exc:
+            payload = json.dumps({"type": "stream.error", "message": str(exc)}, separators=(",", ":"))
+            yield f"event: error\ndata: {payload}\n\n".encode("utf-8")
+
+    return StreamingResponse(iter_events(), media_type="text/event-stream")
 
 
 @app.get("/api/g1/topology")
