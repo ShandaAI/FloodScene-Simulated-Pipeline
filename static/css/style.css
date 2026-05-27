@@ -350,6 +350,10 @@ a:hover {
     opacity: 0.3;
 }
 
+.btn[hidden] {
+    display: none;
+}
+
 .btn.btn-compact {
     flex: 0 0 auto;
     width: auto;
