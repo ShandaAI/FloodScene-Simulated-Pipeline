@@ -2,6 +2,9 @@ class MotionApp {
     constructor() {
         this.sessionId = null;
         this.realtimeSocket = null;
+        this.onlineEventSource = null;
+        this.activeProvider = null;
+        this.isOnlinePaused = false;
 
         this.isRunning = false;
         this.inputMode = 'online';
@@ -15,8 +18,16 @@ class MotionApp {
         this.latencyRecorded = false;
         this.latencySeconds = null;
         this.bufferCapacity = 4;
-        this.smooth = 0.0;
+        this.smooth = 0.7;
         this.generationSeed = 11;
+        this.cfgScale = 5.0;
+        this.historyLength = 30;
+        this.recoverySmoothingAlpha = 0.7;
+        this.onlineBatchSize = 4;
+        this.onlineApiBase = '/api/flooddiffusion';
+        this.onlineFrameQueue = [];
+        this.onlineFrameId = 0;
+        this.nextOnlineFrameAt = 0;
         this.lastUserInteraction = 0;
         this.autoFollowDelay = 2000;
         this.currentRootPos = new THREE.Vector3(0, 1, 0);
@@ -87,6 +98,9 @@ class MotionApp {
         this.offlineAudioRowsEl = document.getElementById('offlineAudioRows');
         this.addAudioCueBtn = document.getElementById('addAudioCueBtn');
         this.startResetBtn = document.getElementById('startResetBtn');
+        this.updateTextBtn = document.getElementById('updateTextBtn');
+        this.pauseResumeBtn = document.getElementById('pauseResumeBtn');
+        this.stopOnlineBtn = document.getElementById('stopOnlineBtn');
         this.recordToggle = document.getElementById('recordToggle');
         this.recordToggleLabel = this.recordToggle?.closest('.record-toggle') || null;
         this.recordingResult = document.getElementById('recordingResult');
@@ -96,6 +110,8 @@ class MotionApp {
         this.configBtn = document.getElementById('configBtn');
         this.configModal = document.getElementById('configModal');
         this.modalSeed = document.getElementById('modalSeed');
+        this.modalCfg = document.getElementById('modalCfg');
+        this.modalHistory = document.getElementById('modalHistory');
         this.modalSmooth = document.getElementById('modalSmooth');
         this.modalSmoothValue = document.getElementById('modalSmoothValue');
         this.configDiscardBtn = document.getElementById('configDiscardBtn');
@@ -143,14 +159,14 @@ class MotionApp {
         this.scene.add(this.keyLight.target);
 
         const floor = new THREE.Mesh(
-            new THREE.PlaneGeometry(22, 22),
+            new THREE.PlaneGeometry(240, 240),
             new THREE.ShadowMaterial({ color: 0x000000, opacity: 0.08 }),
         );
         floor.rotation.x = -Math.PI / 2;
         floor.receiveShadow = true;
         this.scene.add(floor);
 
-        const grid = new THREE.GridHelper(22, 22, 0xd0d0d0, 0xeeeeee);
+        const grid = new THREE.GridHelper(240, 240, 0xd0d0d0, 0xeeeeee);
         grid.position.y = 0.01;
         this.scene.add(grid);
 
@@ -659,10 +675,21 @@ class MotionApp {
     initUI() {
         this.startResetBtn.addEventListener('click', () => {
             if (this.isRunning) {
-                this.reset();
+                if (this.inputMode === 'online' && this.activeProvider === 'flooddiffusion') {
+                    this.restartOnline().catch(error => this.setStatus(error.message || 'Error'));
+                } else {
+                    this.reset();
+                }
             } else {
                 this.start();
             }
+        });
+        this.updateTextBtn.addEventListener('click', () => {
+            this.updateOnlineText().catch(error => this.setStatus(error.message || 'Update Error'));
+        });
+        this.pauseResumeBtn.addEventListener('click', () => this.toggleOnlinePause());
+        this.stopOnlineBtn.addEventListener('click', () => {
+            this.stopOnline().catch(error => this.setStatus(error.message || 'Stop Error'));
         });
         this.configBtn.addEventListener('click', () => this.openConfig());
         this.onlineModeBtn.addEventListener('click', () => this.setInputMode('online'));
@@ -673,7 +700,8 @@ class MotionApp {
         this.motionText.addEventListener('keydown', event => {
             if (event.key === 'Enter' && this.inputMode === 'online') {
                 event.preventDefault();
-                if (!this.isRunning) this.start();
+                if (this.isRunning) this.updateOnlineText();
+                else this.start();
             }
         });
         this.configDiscardBtn.addEventListener('click', () => this.closeConfig());
@@ -708,6 +736,7 @@ class MotionApp {
         this.offlineAudioInputPanel.hidden = !isOfflineAudio;
         if (!isOfflineAudio) this.updateAudioStatus('Idle');
         this.clearSubtitleTimeline();
+        this.setButtonState();
     }
 
     renderOfflineSchedule() {
@@ -1275,10 +1304,22 @@ class MotionApp {
             const config = await response.json();
             this.config = config;
             this.targetFps = config.frame_rate || 20;
+            this.onlineApiBase = config.online?.api_base_url || '/api/flooddiffusion';
+            this.onlineBatchSize = Math.max(1, Number(config.online?.batch_size || 4));
+            this.cfgScale = Number(config.online?.default_cfg ?? this.cfgScale);
+            this.historyLength = Math.max(1, Number(config.online?.default_history_length || this.historyLength));
+            this.smooth = Math.max(0, Math.min(1, Number(config.online?.default_smoothing ?? this.smooth)));
+            this.recoverySmoothingAlpha = Math.max(
+                0.01,
+                Math.min(1, Number(config.online?.recovery_smoothing_alpha ?? this.recoverySmoothingAlpha)),
+            );
             if (Number.isInteger(config.kimodo_g1_default_seed)) {
                 this.generationSeed = config.kimodo_g1_default_seed;
             }
-            await this.initAvatar(config);
+            await this.initAvatar(config).catch(error => {
+                if (this.inputMode !== 'online') throw error;
+                console.warn('Default avatar failed to initialize; online mode will load SMPL-H on start.', error);
+            });
             return config;
         } catch (error) {
             this.setStatus('Offline');
@@ -1288,6 +1329,7 @@ class MotionApp {
 
     rendererKey(rendererName) {
         const normalized = String(rendererName || 'g1').toLowerCase();
+        if (normalized.includes('smplh') || normalized.includes('flooddiffusion')) return 'smplh';
         return normalized.includes('smplx') ? 'smplx' : 'g1';
     }
 
@@ -1348,6 +1390,11 @@ class MotionApp {
             await recordingStartPromise;
             this.startTimer();
             await this.meshReadyPromise;
+            if (this.inputMode === 'online') {
+                await this.startOnline(onlineText);
+                this.setButtonState();
+                return;
+            }
             const sessionPayload = {
                 renderer: this.config?.renderer || 'g1',
                 input_mode: 'offline',
@@ -1356,10 +1403,7 @@ class MotionApp {
                     smooth: this.smooth,
                 },
             };
-            if (this.inputMode === 'online') {
-                sessionPayload.schedule = [{ text: onlineText, start: 0, end: 4 }];
-                this.setSubtitleTimeline(sessionPayload.schedule);
-            } else if (this.inputMode === 'offline_audio') {
+            if (this.inputMode === 'offline_audio') {
                 sessionPayload.renderer = 'smplx';
                 sessionPayload.input_mode = 'offline_audio';
                 await audioUnlockPromise;
@@ -1403,6 +1447,91 @@ class MotionApp {
             this.setStatus(error.message || 'Error');
             this.setControlsLocked(false);
         }
+    }
+
+    async startOnline(text) {
+        if (!text) throw new Error('Online text cannot be empty.');
+        const schedule = [{ text, start: 0, end: 4 }];
+        this.setSubtitleTimeline(schedule);
+
+        await this.ensureAvatar('smplh');
+        if (!this.avatar) throw new Error('Avatar failed to initialize');
+        this.frameCount = 0;
+        this.motionFpsCounter = 0;
+        this.motionFpsUpdatedAt = performance.now();
+        this.motionFpsFirstFrameAt = null;
+        this.displayFramePrevious = null;
+        this.displayFrameCurrent = null;
+        this.appliedDisplayFrameId = null;
+        this.firstFrameAppliedAt = null;
+        this.onlineFrameQueue = [];
+        this.onlineFrameId = 0;
+        this.avatar.clearTrail();
+        this.avatar.setVisible(false);
+        this.updateFrameDisplay(0);
+        this.updateBufferDisplay(0, this.onlineBatchSize);
+        this.updateLatencyDisplay();
+        this.fpsEl.textContent = '0';
+
+        const response = await fetch(`${this.onlineApiBase}/sessions`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                text,
+                force: true,
+                config: {
+                    seed: this.generationSeed,
+                    cfg: this.cfgScale,
+                    max_history_length: this.historyLength,
+                    smoothing_alpha: this.recoverySmoothingAlpha,
+                },
+            }),
+        });
+        const data = await response.json();
+        if (!response.ok || data.status !== 'success') {
+            throw new Error(data.detail || data.message || 'FloodDiffusion session failed.');
+        }
+
+        this.sessionId = data.session_id;
+        this.activeProvider = 'flooddiffusion';
+        this.isOnlinePaused = false;
+        this.targetFps = Number(data.target_fps || 30);
+        this.sourceFrameIntervalMs = 1000 / this.targetFps;
+        this.nextOnlineFrameAt = performance.now() + this.sourceFrameIntervalMs;
+        this.isRunning = true;
+        this.connectOnlineStream();
+    }
+
+    connectOnlineStream() {
+        if (this.onlineEventSource) this.onlineEventSource.close();
+        const streamUrl = `${this.onlineApiBase}/sessions/${this.sessionId}/stream?batch_size=${this.onlineBatchSize}&realtime=1`;
+        this.onlineEventSource = new EventSource(streamUrl);
+        this.onlineEventSource.addEventListener('ready', () => {
+            if (this.isOnlinePaused) return;
+            this.setStatus('Streaming');
+        });
+        this.onlineEventSource.addEventListener('motion', event => {
+            if (this.isOnlinePaused) return;
+            this.enqueueOnlineMotionBatch(JSON.parse(event.data));
+        });
+        this.onlineEventSource.addEventListener('stopped', () => {
+            if (this.activeProvider !== 'flooddiffusion') return;
+            this.isRunning = false;
+            this.sessionId = null;
+            this.activeProvider = null;
+            this.isOnlinePaused = false;
+            this.closeOnlineStream();
+            this.stopTimer();
+            this.stopPageRecording();
+            this.setButtonState();
+            this.setStatus('Stopped');
+        });
+        this.onlineEventSource.addEventListener('error', event => {
+            console.error('FloodDiffusion stream error', event);
+            if (this.activeProvider === 'flooddiffusion' && this.isRunning && !this.isOnlinePaused) {
+                this.setStatus('Stream Error');
+            }
+        });
     }
 
     connectRealtime(sessionPayload) {
@@ -1492,6 +1621,119 @@ class MotionApp {
         this.setStatus('Streaming');
     }
 
+    enqueueOnlineMotionBatch(data) {
+        if (!data.rotmats_b64 || !data.transls) return;
+        const bytes = this.decodeB64Bytes(data.rotmats_b64);
+        const allRotmats = new Float32Array(bytes.buffer);
+        const rotPerFrame = 22 * 9;
+        const startFrameId = this.onlineFrameId;
+
+        for (let i = 0; i < data.count; i++) {
+            const offset = i * rotPerFrame;
+            const joints = new Float32Array(22 * 3);
+            if (data.joints?.[i]) {
+                for (let j = 0; j < 22; j++) {
+                    joints[j * 3] = data.joints[i][j][0];
+                    joints[j * 3 + 1] = data.joints[i][j][1];
+                    joints[j * 3 + 2] = data.joints[i][j][2];
+                }
+            }
+            const transl = data.transls[i] || [0, 0, 0];
+            this.onlineFrameQueue.push({
+                frameId: startFrameId + i + 1,
+                root: data.joints?.[i]?.[0] || transl,
+                bufferSize: this.onlineFrameQueue.length,
+                bufferCapacity: this.onlineBatchSize,
+                joints,
+                rotmats: allRotmats.subarray(offset, offset + rotPerFrame),
+                transl,
+            });
+        }
+        this.onlineFrameId += data.count;
+        if (this.onlineFrameQueue.length > this.onlineBatchSize * 3) {
+            this.onlineFrameQueue.splice(0, this.onlineFrameQueue.length - this.onlineBatchSize * 3);
+        }
+        this.updateBufferDisplay(this.onlineFrameQueue.length, this.onlineBatchSize);
+    }
+
+    decodeB64Bytes(b64) {
+        const bin = atob(b64);
+        const bytes = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+        return bytes;
+    }
+
+    consumeOnlineFrame(now) {
+        if (!this.isRunning || this.activeProvider !== 'flooddiffusion') return;
+        if (now < this.nextOnlineFrameAt || this.onlineFrameQueue.length === 0) return;
+
+        this.nextOnlineFrameAt += this.sourceFrameIntervalMs;
+        if (this.nextOnlineFrameAt < now) {
+            this.nextOnlineFrameAt = now + this.sourceFrameIntervalMs;
+        }
+
+        const frame = this.onlineFrameQueue.shift();
+        frame.bufferSize = this.onlineFrameQueue.length;
+        frame.bufferCapacity = this.onlineBatchSize;
+        this.enqueueDisplayFrame(frame);
+        this.frameCount = frame.frameId;
+        this.motionFpsCounter += 1;
+        if (this.motionFpsFirstFrameAt === null) {
+            this.motionFpsFirstFrameAt = performance.now();
+            this.motionFpsUpdatedAt = this.motionFpsFirstFrameAt;
+        }
+        this.updateFrameDisplay(frame.frameId);
+        this.updateBufferDisplay(this.onlineFrameQueue.length, this.onlineBatchSize);
+        this.updateMotionFps();
+        this.setStatus('Streaming');
+    }
+
+    async updateOnlineText() {
+        if (this.activeProvider !== 'flooddiffusion' || !this.sessionId) return;
+        const text = this.motionText.value.trim();
+        if (!text) return;
+        const response = await fetch(`${this.onlineApiBase}/sessions/${this.sessionId}/text`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ text }),
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok || data.status !== 'success') {
+            this.setStatus(data.detail || data.message || 'Update Error');
+            return;
+        }
+        this.setSubtitleTimeline([{ text, start: 0, end: 4 }]);
+        this.setStatus(this.isOnlinePaused ? 'Paused' : 'Streaming');
+    }
+
+    async restartOnline() {
+        if (this.activeProvider !== 'flooddiffusion') return;
+        await this.reset();
+        await this.start();
+    }
+
+    async stopOnline() {
+        if (this.activeProvider !== 'flooddiffusion') return;
+        await this.reset();
+    }
+
+    toggleOnlinePause() {
+        if (this.activeProvider !== 'flooddiffusion' || !this.sessionId) return;
+        if (this.isOnlinePaused) {
+            this.isOnlinePaused = false;
+            this.nextOnlineFrameAt = performance.now() + this.sourceFrameIntervalMs;
+            this.connectOnlineStream();
+            this.setStatus('Streaming');
+        } else {
+            this.isOnlinePaused = true;
+            this.closeOnlineStream();
+            this.onlineFrameQueue = [];
+            this.updateBufferDisplay(0, this.onlineBatchSize);
+            this.setStatus('Paused');
+        }
+        this.setButtonState();
+    }
+
     copyFrame(frame) {
         const copied = {
             frameId: frame.frameId,
@@ -1505,6 +1747,8 @@ class MotionApp {
         if (frame.rootOrient) copied.rootOrient = new Float32Array(frame.rootOrient);
         if (frame.poseBody) copied.poseBody = new Float32Array(frame.poseBody);
         if (frame.trans) copied.trans = new Float32Array(frame.trans);
+        if (frame.rotmats) copied.rotmats = new Float32Array(frame.rotmats);
+        if (frame.transl) copied.transl = [...frame.transl];
         return copied;
     }
 
@@ -1532,6 +1776,46 @@ class MotionApp {
         this.displayFramePrevious = this.displayFrameCurrent;
         this.displayFrameCurrent = copied;
         this.displayFrameStartedAt = performance.now();
+    }
+
+    interpolateRotmats(prev, curr, t) {
+        const out = new Float32Array(curr.length);
+        for (let offset = 0; offset < curr.length; offset += 9) {
+            let r0x = prev[offset] * (1 - t) + curr[offset] * t;
+            let r0y = prev[offset + 1] * (1 - t) + curr[offset + 1] * t;
+            let r0z = prev[offset + 2] * (1 - t) + curr[offset + 2] * t;
+            let inv = 1 / Math.max(1e-8, Math.hypot(r0x, r0y, r0z));
+            r0x *= inv;
+            r0y *= inv;
+            r0z *= inv;
+
+            let r1x = prev[offset + 3] * (1 - t) + curr[offset + 3] * t;
+            let r1y = prev[offset + 4] * (1 - t) + curr[offset + 4] * t;
+            let r1z = prev[offset + 5] * (1 - t) + curr[offset + 5] * t;
+            const dot = r0x * r1x + r0y * r1y + r0z * r1z;
+            r1x -= dot * r0x;
+            r1y -= dot * r0y;
+            r1z -= dot * r0z;
+            inv = 1 / Math.max(1e-8, Math.hypot(r1x, r1y, r1z));
+            r1x *= inv;
+            r1y *= inv;
+            r1z *= inv;
+
+            const r2x = r0y * r1z - r0z * r1y;
+            const r2y = r0z * r1x - r0x * r1z;
+            const r2z = r0x * r1y - r0y * r1x;
+
+            out[offset] = r0x;
+            out[offset + 1] = r0y;
+            out[offset + 2] = r0z;
+            out[offset + 3] = r1x;
+            out[offset + 4] = r1y;
+            out[offset + 5] = r1z;
+            out[offset + 6] = r2x;
+            out[offset + 7] = r2y;
+            out[offset + 8] = r2z;
+        }
+        return out;
     }
 
     applyInterpolatedDisplayFrame(now) {
@@ -1582,25 +1866,43 @@ class MotionApp {
             curr.root[1] * (1 - smooth) + interpolatedRoot[1] * smooth,
             curr.root[2] * (1 - smooth) + interpolatedRoot[2] * smooth,
         ];
-        this.avatar.applyFrame({ ...curr, root, joints, vertices }, 1);
+        const frame = { ...curr, root, joints, vertices };
+        if (prev.rotmats && curr.rotmats && prev.rotmats.length === curr.rotmats.length) {
+            const rotT = (1 - smooth) + alpha * smooth;
+            frame.rotmats = this.interpolateRotmats(prev.rotmats, curr.rotmats, rotT);
+            if (prev.transl && curr.transl) {
+                frame.transl = [
+                    prev.transl[0] * (1 - rotT) + curr.transl[0] * rotT,
+                    prev.transl[1] * (1 - rotT) + curr.transl[1] * rotT,
+                    prev.transl[2] * (1 - rotT) + curr.transl[2] * rotT,
+                ];
+            }
+        }
+        this.avatar.applyFrame(frame, 1);
         this.currentRootPos.set(root[0], root[1], root[2]);
     }
 
     async reset(callApi = true) {
         const sessionId = this.sessionId;
+        const provider = this.activeProvider;
         this.isRunning = false;
         this.sessionId = null;
+        this.activeProvider = null;
+        this.isOnlinePaused = false;
         this.closeSockets();
+        if (callApi && provider === 'flooddiffusion' && sessionId) {
+            await fetch(`${this.onlineApiBase}/sessions/${sessionId}`, { method: 'DELETE' }).catch(() => {});
+        }
         this.stopOfflineAudioPlayback(true);
         this.stopPageRecording();
         this.clearSubtitleTimeline();
         this.clearTimer();
-        void callApi;
-        void sessionId;
         this.setStatus('Idle');
         this.frameCount = 0;
         this.motionFpsCounter = 0;
         this.motionFpsFirstFrameAt = null;
+        this.onlineFrameQueue = [];
+        this.onlineFrameId = 0;
         this.displayFramePrevious = null;
         this.displayFrameCurrent = null;
         this.appliedDisplayFrameId = null;
@@ -1617,10 +1919,15 @@ class MotionApp {
     }
 
     sendResetBeacon() {
-        return;
+        if (this.activeProvider !== 'flooddiffusion' || !this.sessionId) return;
+        fetch(`${this.onlineApiBase}/sessions/${this.sessionId}`, {
+            method: 'DELETE',
+            keepalive: true,
+        }).catch(() => {});
     }
 
     closeSockets() {
+        this.closeOnlineStream();
         if (this.realtimeSocket && this.realtimeSocket.readyState <= WebSocket.OPEN) {
             if (this.realtimeSocket.readyState === WebSocket.OPEN) {
                 this.realtimeSocket.send(JSON.stringify({ type: 'session.close' }));
@@ -1628,6 +1935,13 @@ class MotionApp {
             this.realtimeSocket.close();
         }
         this.realtimeSocket = null;
+    }
+
+    closeOnlineStream() {
+        if (this.onlineEventSource) {
+            this.onlineEventSource.close();
+            this.onlineEventSource = null;
+        }
     }
 
     updateMotionFps() {
@@ -1654,6 +1968,8 @@ class MotionApp {
 
     openConfig() {
         this.modalSeed.value = String(this.generationSeed);
+        this.modalCfg.value = String(this.cfgScale);
+        this.modalHistory.value = String(this.historyLength);
         this.modalSmooth.value = String(this.smooth);
         this.modalSmoothValue.textContent = this.smooth.toFixed(2);
         this.configModal.hidden = false;
@@ -1665,9 +1981,13 @@ class MotionApp {
 
     async saveConfig() {
         const nextSeed = Math.max(0, Math.min(2147483647, Math.floor(Number(this.modalSeed.value) || 0)));
+        const nextCfg = Math.max(0, Number(this.modalCfg.value) || 0);
+        const nextHistory = Math.max(1, Math.floor(Number(this.modalHistory.value) || 1));
         const nextSmooth = Math.max(0, Math.min(1, Number(this.modalSmooth.value)));
         const shouldRestart = this.isRunning;
         this.generationSeed = nextSeed;
+        this.cfgScale = nextCfg;
+        this.historyLength = nextHistory;
         this.smooth = nextSmooth;
         this.closeConfig();
         if (shouldRestart) {
@@ -1728,14 +2048,26 @@ class MotionApp {
 
     setControlsLocked(locked) {
         this.startResetBtn.disabled = locked;
+        this.updateTextBtn.disabled = locked || !this.isRunning || this.activeProvider !== 'flooddiffusion';
+        this.pauseResumeBtn.disabled = locked || !this.isRunning || this.activeProvider !== 'flooddiffusion';
+        this.stopOnlineBtn.disabled = locked || !this.isRunning || this.activeProvider !== 'flooddiffusion';
         if (this.recordToggle) this.recordToggle.disabled = locked || this.isRunning;
         if (this.recordToggleLabel) this.recordToggleLabel.classList.toggle('disabled', locked || this.isRunning);
         this.configBtn.disabled = false;
     }
 
     setButtonState() {
+        const isOnline = this.inputMode === 'online';
+        const isFloodOnline = isOnline && this.activeProvider === 'flooddiffusion' && this.isRunning;
         this.startResetBtn.disabled = false;
-        this.startResetBtn.textContent = this.isRunning ? 'Reset' : 'Start';
+        this.startResetBtn.textContent = this.isRunning ? (isFloodOnline ? 'Restart' : 'Reset') : 'Start';
+        this.updateTextBtn.hidden = !isFloodOnline;
+        this.pauseResumeBtn.hidden = !isFloodOnline;
+        this.stopOnlineBtn.hidden = !isFloodOnline;
+        this.updateTextBtn.disabled = !isFloodOnline;
+        this.pauseResumeBtn.disabled = !isFloodOnline;
+        this.stopOnlineBtn.disabled = !isFloodOnline;
+        this.pauseResumeBtn.textContent = this.isOnlinePaused ? 'Resume' : 'Pause';
         if (this.recordToggle) this.recordToggle.disabled = this.isRunning;
         if (this.recordToggleLabel) this.recordToggleLabel.classList.toggle('disabled', this.isRunning);
         this.onlineModeBtn.disabled = this.isRunning;
@@ -1754,12 +2086,13 @@ class MotionApp {
     animate() {
         requestAnimationFrame(() => this.animate());
         const now = performance.now();
+        this.consumeOnlineFrame(now);
         this.applyInterpolatedDisplayFrame(now);
         if (now - this.lastUserInteraction > this.autoFollowDelay) {
-            this.controls.target.lerp(
-                new THREE.Vector3(this.currentRootPos.x, 0.9, this.currentRootPos.z),
-                0.035,
-            );
+            const cameraOffset = new THREE.Vector3().subVectors(this.camera.position, this.controls.target);
+            const target = new THREE.Vector3(this.currentRootPos.x, 0.9, this.currentRootPos.z);
+            this.controls.target.lerp(target, 0.08);
+            this.camera.position.lerp(target.clone().add(cameraOffset), 0.08);
         }
         this.keyLight.position.set(this.currentRootPos.x + 5, 8, this.currentRootPos.z + 3);
         this.keyLight.target.position.set(this.currentRootPos.x, 0, this.currentRootPos.z);
